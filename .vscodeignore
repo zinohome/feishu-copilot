@@ -3,7 +3,6 @@
 **/.github/**
 **/tests/**
 **/*.test.ts
-**/node_modules/**
 **/projects/**
 **/docs/**
 src/**

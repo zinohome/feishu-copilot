@@ -5,20 +5,89 @@ import { vi } from 'vitest';
 
 const commands = {
   registerCommand: (_id: string, _handler: () => void) => ({ dispose: () => {} }),
+  executeCommand: vi.fn(async () => undefined),
 };
 
 const window = {
-  showInformationMessage: (_msg: string) => Promise.resolve(undefined),
-  showErrorMessage: (_msg: string) => Promise.resolve(undefined),
-  showWarningMessage: (_msg: string) => Promise.resolve(undefined),
+  showInformationMessage: vi.fn(async (_msg: string) => undefined),
+  showErrorMessage: vi.fn(async (_msg: string) => undefined),
+  showWarningMessage: vi.fn(async (_msg: string) => undefined),
+  showQuickPick: vi.fn(async () => undefined),
+  createStatusBarItem: vi.fn(() => ({
+    text: '',
+    tooltip: '',
+    command: '',
+    backgroundColor: undefined,
+    show: vi.fn(),
+    dispose: vi.fn(),
+  })),
 };
+
+const configStore: Record<string, unknown> = {};
+const configurationListeners = new Set<(evt: { affectsConfiguration: (section: string) => boolean }) => void>();
+
+function __setConfig(values: Record<string, unknown>) {
+  Object.assign(configStore, values);
+}
+
+function __resetConfig() {
+  for (const key of Object.keys(configStore)) {
+    delete configStore[key];
+  }
+}
+
+function __fireDidChangeConfiguration(changedKey: string) {
+  const evt = {
+    affectsConfiguration: (section: string) =>
+      section === changedKey || changedKey.startsWith(`${section}.`),
+  };
+  for (const listener of configurationListeners) {
+    listener(evt);
+  }
+}
 
 const workspace = {
   workspaceFolders: [] as { uri: { fsPath: string } }[],
-  getConfiguration: (_section?: string) => ({
-    get: (_key: string, defaultValue?: unknown) => defaultValue,
+  getConfiguration: (section?: string) => ({
+    get: (key: string, defaultValue?: unknown) => {
+      const fullKey = section ? `${section}.${key}` : key;
+      return fullKey in configStore ? configStore[fullKey] : defaultValue;
+    },
   }),
+  onDidChangeConfiguration: (listener: (evt: { affectsConfiguration: (section: string) => boolean }) => void) => {
+    configurationListeners.add(listener);
+    return {
+      dispose: () => {
+        configurationListeners.delete(listener);
+      },
+    };
+  },
 };
+
+const StatusBarAlignment = {
+  Right: 2,
+  Left: 1,
+};
+
+class ThemeColor {
+  constructor(public id: string) {}
+}
+
+class ThemeIcon {
+  constructor(public id: string) {}
+}
+
+class MarkdownString {
+  constructor(public value: string) {}
+}
+
+class ChatResponseMarkdownPart {
+  value: MarkdownString;
+
+  constructor(value: string | MarkdownString) {
+    this.value = typeof value === 'string' ? new MarkdownString(value) : value;
+  }
+}
 
 class LanguageModelTextPart {
   constructor(public value: string) {}
@@ -52,5 +121,37 @@ const lm = {
   ]),
 };
 
-export { commands, window, workspace, lm, LanguageModelTextPart, LanguageModelChatMessage, CancellationTokenSource };
-export default { commands, window, workspace, lm, LanguageModelTextPart, LanguageModelChatMessage, CancellationTokenSource };
+export {
+  commands,
+  window,
+  workspace,
+  StatusBarAlignment,
+  ThemeColor,
+  ThemeIcon,
+  lm,
+  __setConfig,
+  __resetConfig,
+  __fireDidChangeConfiguration,
+  MarkdownString,
+  ChatResponseMarkdownPart,
+  LanguageModelTextPart,
+  LanguageModelChatMessage,
+  CancellationTokenSource,
+};
+export default {
+  commands,
+  window,
+  workspace,
+  StatusBarAlignment,
+  ThemeColor,
+  ThemeIcon,
+  lm,
+  __setConfig,
+  __resetConfig,
+  __fireDidChangeConfiguration,
+  MarkdownString,
+  ChatResponseMarkdownPart,
+  LanguageModelTextPart,
+  LanguageModelChatMessage,
+  CancellationTokenSource,
+};
