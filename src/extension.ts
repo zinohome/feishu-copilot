@@ -4,20 +4,78 @@ import type { FeishuWebhookEvent } from './app/pipeline';
 import type { BridgeConfig } from './config/types';
 import { VscodeLmAdapter } from './copilot/vscode-lm-adapter';
 import { getToken } from './feishu/feishu-client';
-import { startFeishuWsEventSource } from './feishu/ws-event-source';
+import type { FeishuWsEventSourceHandle, FeishuWsEventSourceOptions } from './feishu/ws-event-source';
+import { SessionStore } from './session/session-store';
+import { FeishuChatSessionManager } from './session/feishu-chat-session-manager';
+import { AgentRegistry } from './agent/agent-registry';
 
-let wsHandle: { close: () => void } | undefined;
+type StartFeishuWsEventSourceFn = (options: FeishuWsEventSourceOptions) => FeishuWsEventSourceHandle;
+
+let wsHandle: FeishuWsEventSourceHandle | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+let sessionStore: SessionStore | undefined;
+let sessionManager: FeishuChatSessionManager | undefined;
+let agentRegistry: AgentRegistry | undefined;
 
-function readConfig(): { appId: string; appSecret: string; isConfigured: boolean } {
+function rebuildAgentRuntime(context: vscode.ExtensionContext): void {
+  if (!sessionStore) {
+    return;
+  }
+
+  sessionManager?.dispose();
+  agentRegistry = new AgentRegistry({
+    superpowersSourcePath: readSuperpowersSourcePath(),
+  });
+  const copilot = new VscodeLmAdapter();
+  sessionManager = new FeishuChatSessionManager(sessionStore, copilot, agentRegistry);
+
+  try {
+    sessionManager.register(context);
+  } catch (err) {
+    // proposed API not available (flag not set) – gracefully degrade
+    console.warn('Feishu Copilot: chatSessions proposed API unavailable, falling back.', err);
+  }
+}
+
+function loadWsEventSourceStarter(): StartFeishuWsEventSourceFn {
+  const mod = require('./feishu/ws-event-source') as {
+    startFeishuWsEventSource: StartFeishuWsEventSourceFn;
+  };
+  return mod.startFeishuWsEventSource;
+}
+
+function readConfig(): { appId: string; appSecret: string; ownerOpenId: string; isConfigured: boolean } {
   const cfg = vscode.workspace.getConfiguration('feishuCopilot');
   const appId = cfg.get<string>('feishuAppId', '').trim();
   const appSecret = cfg.get<string>('feishuAppSecret', '').trim();
+  const ownerOpenId = cfg.get<string>('ownerOpenId', '').trim();
   return {
     appId,
     appSecret,
-    isConfigured: Boolean(appId && appSecret),
+    ownerOpenId,
+    isConfigured: Boolean(appId && appSecret && ownerOpenId),
   };
+}
+
+function readSuperpowersSourcePath(): string {
+  const cfg = vscode.workspace.getConfiguration('feishuCopilot');
+  return cfg.get<string>('superpowersSourcePath', '').trim();
+}
+
+export function shouldRestartBridgeForConfigChange(
+  evt: { affectsConfiguration: (section: string) => boolean },
+  isBridgeRunning: boolean,
+): boolean {
+  if (!isBridgeRunning) {
+    return false;
+  }
+
+  return (
+    evt.affectsConfiguration('feishuCopilot.superpowersSourcePath') ||
+    evt.affectsConfiguration('feishuCopilot.ownerOpenId') ||
+    evt.affectsConfiguration('feishuCopilot.feishuAppId') ||
+    evt.affectsConfiguration('feishuCopilot.feishuAppSecret')
+  );
 }
 
 function updateStatusBar(): void {
@@ -57,7 +115,7 @@ async function startBridge(showToast = true): Promise<void> {
     return;
   }
 
-  const { appId, appSecret } = readConfig();
+  const { appId, appSecret, ownerOpenId } = readConfig();
   if (!appId) {
     void vscode.window.showErrorMessage('Feishu Copilot: feishuAppId is required');
     updateStatusBar();
@@ -66,6 +124,12 @@ async function startBridge(showToast = true): Promise<void> {
 
   if (!appSecret) {
     void vscode.window.showErrorMessage('Feishu Copilot: feishuAppSecret is required');
+    updateStatusBar();
+    return;
+  }
+
+  if (!ownerOpenId) {
+    void vscode.window.showErrorMessage('Feishu Copilot: ownerOpenId is required for sender authorization');
     updateStatusBar();
     return;
   }
@@ -86,12 +150,30 @@ async function startBridge(showToast = true): Promise<void> {
   const copilot = new VscodeLmAdapter();
 
   const bridgeConfig: BridgeConfig = {
+    ownerOpenId,
     workspaceAllowlist: [],
     approvalTimeoutMs,
     cardPatchIntervalMs,
   };
 
-  const pipeline = new Pipeline({ config: bridgeConfig, copilot, feishuToken });
+  const pipeline = new Pipeline({
+    config: bridgeConfig,
+    copilot,
+    feishuToken,
+    sessionStore,
+    sessionManager,
+    agentRegistry,
+  });
+
+  let startFeishuWsEventSource: StartFeishuWsEventSourceFn;
+  try {
+    startFeishuWsEventSource = loadWsEventSourceStarter();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(`Feishu Copilot: Failed to load WS SDK: ${msg}`);
+    updateStatusBar();
+    return;
+  }
 
   wsHandle = startFeishuWsEventSource({
     appId,
@@ -100,14 +182,20 @@ async function startBridge(showToast = true): Promise<void> {
       await pipeline.handleInbound(event as FeishuWebhookEvent);
     },
     onError: (err) => {
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err?.error ?? err;
+      const msg = raw instanceof Error ? raw.message : String(raw);
+      if (err?.phase === 'start') {
+        stopBridge(false);
+        void vscode.window.showErrorMessage(`Feishu Copilot WS start failed: ${msg}`);
+        return;
+      }
       void vscode.window.showErrorMessage(`Feishu Copilot WS error: ${msg}`);
     },
   });
 
   updateStatusBar();
   if (showToast) {
-    void vscode.window.showInformationMessage('Feishu Copilot Bridge started (WebSocket mode)');
+    void vscode.window.showInformationMessage('Feishu Copilot Bridge start initiated (WebSocket mode)');
   }
 }
 
@@ -205,6 +293,10 @@ async function showStatusMenu(): Promise<void> {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // Initialize session store and Copilot Chat session manager
+  sessionStore = new SessionStore(context);
+  rebuildAgentRuntime(context);
+
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.show();
   updateStatusBar();
@@ -232,14 +324,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const configWatcher = vscode.workspace.onDidChangeConfiguration((evt) => {
     if (evt.affectsConfiguration('feishuCopilot')) {
       updateStatusBar();
+
+      const requiresRestart = shouldRestartBridgeForConfigChange(evt, Boolean(wsHandle));
+
+      if (evt.affectsConfiguration('feishuCopilot.superpowersSourcePath')) {
+        rebuildAgentRuntime(context);
+      }
+
+      if (requiresRestart) {
+        void restartBridge();
+      }
     }
   });
 
   const serverDisposable = {
     dispose: () => {
       stopBridge(false);
+      sessionManager?.dispose();
+      sessionManager = undefined;
       statusBarItem?.dispose();
       statusBarItem = undefined;
+      sessionStore?.dispose();
+      sessionStore = undefined;
+      agentRegistry = undefined;
     },
   };
 

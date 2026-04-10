@@ -17,7 +17,12 @@ export class VscodeLmAdapter implements CopilotAdapter {
 
     const model = models[0];
     const cts = new vscode.CancellationTokenSource();
-    signal?.addEventListener('abort', () => cts.cancel());
+    const onAbort = () => cts.cancel();
+    if (signal?.aborted) {
+      cts.cancel();
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }
 
     try {
       const request = await model.sendRequest(
@@ -32,6 +37,7 @@ export class VscodeLmAdapter implements CopilotAdapter {
         }
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       cts.dispose();
     }
   }
