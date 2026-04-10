@@ -78,4 +78,33 @@ describe('VscodeLmAdapter', () => {
     // but CancellationTokenSource.cancel() was called without throwing
     expect(chunks).toContain('chunk1');
   });
+
+  it('cancels immediately when signal is already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+
+    const sendRequestSpy = vi.fn(async (_messages, _options, token: { isCancellationRequested: boolean }) => {
+      expect(token.isCancellationRequested).toBe(true);
+      return {
+        stream: (async function* () {
+          // no chunks
+        })(),
+      };
+    });
+
+    vi.mocked(vscode.lm.selectChatModels).mockResolvedValueOnce([
+      {
+        sendRequest: sendRequestSpy,
+      } as unknown as vscode.LanguageModelChat,
+    ] as unknown as Awaited<ReturnType<typeof vscode.lm.selectChatModels>>);
+
+    const adapter = new VscodeLmAdapter();
+    const chunks: string[] = [];
+    for await (const chunk of adapter.generate(baseMessage, ac.signal)) {
+      chunks.push(chunk);
+    }
+
+    expect(sendRequestSpy).toHaveBeenCalledOnce();
+    expect(chunks).toEqual([]);
+  });
 });
