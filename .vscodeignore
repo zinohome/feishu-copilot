@@ -1,5 +1,13 @@
 **/.git/**
 **/.DS_Store
+**/.github/**
 **/tests/**
 **/*.test.ts
 **/node_modules/**
+**/projects/**
+**/docs/**
+src/**
+**/tsconfig.json
+**/vitest.config.ts
+**/package-lock.json
+**/.gitignore
