@@ -2,16 +2,79 @@
   "name": "feishu-copilot-bridge",
   "version": "0.0.1",
   "private": true,
-  "type": "module",
+  "publisher": "feishu-copilot",
+  "displayName": "Feishu Copilot Bridge",
+  "description": "Bridge Feishu private chat to VS Code Copilot",
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "feishu-copilot.start",
+        "title": "Feishu Copilot: Start Bridge"
+      },
+      {
+        "command": "feishu-copilot.stop",
+        "title": "Feishu Copilot: Stop Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "Feishu Copilot Bridge",
+      "properties": {
+        "feishuCopilot.ownerOpenId": {
+          "type": "string",
+          "default": "",
+          "description": "The Feishu open ID of the owner who can send messages to the bridge (required)."
+        },
+        "feishuCopilot.feishuAppId": {
+          "type": "string",
+          "default": "",
+          "description": "Feishu application ID (required)."
+        },
+        "feishuCopilot.feishuAppSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Feishu application secret (required)."
+        },
+        "feishuCopilot.webhookPort": {
+          "type": "number",
+          "default": 3456,
+          "description": "Local port for the webhook server."
+        },
+        "feishuCopilot.approvalTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Approval request timeout in milliseconds."
+        },
+        "feishuCopilot.cardPatchIntervalMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Interval in milliseconds between card patch updates."
+        }
+      }
+    }
+  },
+  "extensionKind": [
+    "ui"
+  ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "vscode": "^1.100.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json",
+    "vscode:prepublish": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
+    "@types/vscode": "^1.115.0",
     "typescript": "^5.8.3",
     "vitest": "^2.1.8"
   }

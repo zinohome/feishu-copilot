@@ -4,6 +4,19 @@ export interface WebhookServerOptions {
   onBody: (body: string, req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 }
 
+export function startWebhookServer(
+  port: number,
+  onBody: (body: string, req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
+): { close: () => void } {
+  const server = createWebhookServer({ onBody });
+  server.listen(port);
+  return {
+    close: () => {
+      server.close();
+    },
+  };
+}
+
 export function createWebhookServer(options: WebhookServerOptions): Server {
   return createServer(async (req, res) => {
     if (req.method !== 'POST') {

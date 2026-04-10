@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import * as extension from "../src/extension.js";
+import * as extension from "../src/extension";
 
 describe("bootstrap extension exports", () => {
   it("exports activate and deactivate", () => {
