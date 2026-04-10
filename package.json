@@ -1,6 +1,6 @@
 {
   "name": "feishu-copilot-bridge",
-  "version": "0.0.1",
+  "version": "0.0.5",
   "private": true,
   "publisher": "feishu-copilot",
   "displayName": "Feishu Copilot Bridge",
@@ -13,6 +13,22 @@
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "feishu-copilot.chat",
+        "name": "feishu",
+        "fullName": "Feishu Copilot",
+        "description": "Chat with Copilot, synced with Feishu",
+        "isDefault": false,
+        "locations": ["panel"]
+      }
+    ],
+    "chatSessions": [
+      {
+        "type": "feishu",
+        "name": "Feishu Sessions"
+      }
+    ],
     "commands": [
       {
         "command": "feishu-copilot.start",
@@ -47,12 +63,25 @@
           "type": "string",
           "default": "",
           "description": "Feishu application secret (required)."
+        },
+        "feishuCopilot.ownerOpenId": {
+          "type": "string",
+          "default": "",
+          "description": "Allowed Feishu sender open_id. Messages from other senders are ignored."
+        },
+        "feishuCopilot.superpowersSourcePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path of Superpowers extension root. If empty, auto-detect from ~/.vscode/extensions."
         }
       }
     }
   },
   "extensionKind": [
     "ui"
+  ],
+  "enabledApiProposals": [
+    "chatSessionsProvider"
   ],
   "engines": {
     "node": ">=22",
