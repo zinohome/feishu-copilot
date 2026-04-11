@@ -20,7 +20,17 @@ export function startFeishuEventSource(options: FeishuEventSourceOptions): { dis
   dispatcher.register({
     'im.message.receive_v1': async (data: any) => {
       const event = data?.event ?? data;
-      const text = JSON.parse(event.message.content).text ?? '';
+      // Feishu delivers non-text messages (images, files, cards) with a different content schema.
+      // An unparseable or text-absent payload is silently ignored rather than crashing the WS loop.
+      let text: string;
+      try {
+        text = (JSON.parse(event.message.content) as { text?: string }).text ?? '';
+      } catch {
+        return;
+      }
+      if (!text) {
+        return;
+      }
       await options.onMessage({
         senderOpenId: event.sender.sender_id.open_id,
         chatId: event.message.chat_id,

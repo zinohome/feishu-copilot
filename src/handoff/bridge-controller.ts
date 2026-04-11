@@ -5,6 +5,7 @@ import { renderMirroredTurn, renderSessionSwitch } from './feishu-renderer';
 export interface BridgeControllerOptions {
   ownerOpenId: string;
   targetChatId: string;
+  maxMirroredSessions?: number;
   sendFeishuText: (chatId: string, text: string) => Promise<string>;
 }
 
@@ -41,7 +42,7 @@ export class BridgeController {
     await this.options.sendFeishuText(this.options.targetChatId, renderMirroredTurn(currentTarget));
   }
 
-  listRecentSessions(limit = 8): SessionSummary[] {
+  listRecentSessions(limit = this.options.maxMirroredSessions ?? 8): SessionSummary[] {
     return this.tracker.listRecent(limit);
   }
 

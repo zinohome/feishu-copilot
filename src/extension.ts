@@ -17,12 +17,20 @@ export interface ActivateDeps {
   workspaceStoragePath?: string;
 }
 
+// Module-level so deactivate() can clean up even without a closure
+let activeEventSource: { dispose: () => void } | undefined;
+
 export async function activate(
   context: vscode.ExtensionContext,
   deps?: ActivateDeps,
 ): Promise<void> {
   const cmds = deps?.commands ?? vscode.commands;
-  const storagePath = deps?.workspaceStoragePath ?? context.storageUri?.fsPath ?? '';
+
+  // Fix #1: chatSessions/ lives at the workspace storage root, one level above the
+  // extension's own private folder (context.storageUri.fsPath).
+  const storagePath =
+    deps?.workspaceStoragePath ??
+    (context.storageUri ? path.dirname(context.storageUri.fsPath) : '');
 
   const config = readExtensionConfig(
     vscode.workspace?.getConfiguration?.('feishuCopilotHandoff') ?? {
@@ -34,18 +42,27 @@ export async function activate(
     (command: string, ...args: unknown[]) => cmds.executeCommand(command, ...args),
   );
 
-  let token = '';
-  if (config.feishuAppId && config.feishuAppSecret) {
-    token = await getTenantAccessToken(config.feishuAppId, config.feishuAppSecret);
+  // Fix #2: lazy token refresh — Feishu tokens expire in ~2 hours.
+  let cachedToken = '';
+  let tokenExpiresAt = 0;
+
+  async function freshToken(): Promise<string> {
+    if (!config.feishuAppId || !config.feishuAppSecret) {
+      return '';
+    }
+    if (!cachedToken || Date.now() > tokenExpiresAt) {
+      cachedToken = await getTenantAccessToken(config.feishuAppId, config.feishuAppSecret);
+      tokenExpiresAt = Date.now() + 100 * 60 * 1000; // refresh conservatively at 100 min
+    }
+    return cachedToken;
   }
 
   const controller = new BridgeController({
     ownerOpenId: config.ownerOpenId,
     targetChatId: config.targetChatId,
-    sendFeishuText: (chatId, text) => sendFeishuText(token, chatId, text),
+    maxMirroredSessions: config.maxMirroredSessions,
+    sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(), chatId, text),
   });
-
-  let eventSource: { dispose: () => void } | undefined;
 
   async function refreshSessions(): Promise<void> {
     if (!storagePath) {
@@ -66,8 +83,16 @@ export async function activate(
 
   context.subscriptions.push(
     cmds.registerCommand('feishuCopilotHandoff.start', async () => {
+      // Fix #6: validate required config fields before attempting to connect
+      if (!config.feishuAppId || !config.feishuAppSecret || !config.ownerOpenId || !config.targetChatId) {
+        void vscode.window?.showErrorMessage?.(
+          'Feishu Copilot Handoff: feishuAppId, feishuAppSecret, ownerOpenId, and targetChatId must all be configured.',
+        );
+        return;
+      }
+
       await refreshSessions();
-      eventSource = startFeishuEventSource({
+      activeEventSource = startFeishuEventSource({
         appId: config.feishuAppId,
         appSecret: config.feishuAppSecret,
         onMessage: async (message) => {
@@ -78,14 +103,14 @@ export async function activate(
             commandService.submitToChat(text),
           );
           if (reply) {
-            await sendFeishuText(token, config.targetChatId, reply);
+            await sendFeishuText(await freshToken(), config.targetChatId, reply);
           }
         },
       });
     }),
     cmds.registerCommand('feishuCopilotHandoff.stop', async () => {
-      eventSource?.dispose();
-      eventSource = undefined;
+      activeEventSource?.dispose();
+      activeEventSource = undefined;
     }),
     cmds.registerCommand('feishuCopilotHandoff.status', async () => {
       void vscode.window?.showInformationMessage?.(controller.getStatusText());
@@ -93,4 +118,9 @@ export async function activate(
   );
 }
 
-export function deactivate(): void {}
+// Fix #4: close the WebSocket connection when the extension is deactivated
+export function deactivate(): void {
+  activeEventSource?.dispose();
+  activeEventSource = undefined;
+}
+

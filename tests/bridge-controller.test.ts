@@ -48,3 +48,56 @@ describe('BridgeController remote commands', () => {
     expect(controller.getStatusText()).toContain('follow-latest');
   });
 });
+
+describe('BridgeController handleFeishuText routing', () => {
+  function makeController() {
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: vi.fn().mockResolvedValue('msg_1'),
+    });
+    // seed two sessions
+    controller['tracker'].upsert({ sessionId: 'a', title: 'Alpha', lastUserMessageAt: 10, lastAssistantMessageAt: 10, lastFileWriteAt: 10, turns: [] });
+    controller['tracker'].upsert({ sessionId: 'b', title: 'Beta', lastUserMessageAt: 20, lastAssistantMessageAt: 20, lastFileWriteAt: 20, turns: [] });
+    return controller;
+  }
+
+  it('/sessions returns numbered list', async () => {
+    const result = await makeController().handleFeishuText('/sessions', vi.fn());
+    expect(result).toContain('1. Beta');
+    expect(result).toContain('2. Alpha');
+  });
+
+  it('/status returns mode and session name', async () => {
+    const result = await makeController().handleFeishuText('/status', vi.fn());
+    expect(result).toContain('follow-latest');
+    expect(result).toContain('Beta');
+  });
+
+  it('/switch N locks to chosen index', async () => {
+    const controller = makeController();
+    const result = await controller.handleFeishuText('/switch 2', vi.fn());
+    expect(result).toContain('manual-lock');
+    expect(result).toContain('Alpha');
+  });
+
+  it('/follow-latest returns to auto-follow', async () => {
+    const controller = makeController();
+    controller.switchByIndex(2);
+    const result = await controller.handleFeishuText('/follow-latest', vi.fn());
+    expect(result).toContain('follow-latest');
+  });
+
+  it('plain text is forwarded to submitToChat and returns undefined', async () => {
+    const submitToChat = vi.fn().mockResolvedValue(undefined);
+    const result = await makeController().handleFeishuText('help me fix this bug', submitToChat);
+    expect(submitToChat).toHaveBeenCalledWith('help me fix this bug');
+    expect(result).toBeUndefined();
+  });
+
+  it('/switch with out-of-range index throws', async () => {
+    await expect(
+      makeController().handleFeishuText('/switch 99', vi.fn()),
+    ).rejects.toThrow('Unknown session index: 99');
+  });
+});
