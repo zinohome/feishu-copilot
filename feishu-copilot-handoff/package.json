@@ -1,6 +1,6 @@
 {
   "name": "feishu-copilot-handoff",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "publisher": "feishu-copilot",
   "displayName": "Feishu Copilot Handoff",
@@ -21,12 +21,30 @@
   ],
   "contributes": {
     "commands": [
-      { "command": "feishuCopilotHandoff.start", "title": "Feishu Copilot Handoff: Start" },
-      { "command": "feishuCopilotHandoff.stop", "title": "Feishu Copilot Handoff: Stop" },
-      { "command": "feishuCopilotHandoff.restart", "title": "Feishu Copilot Handoff: Restart" },
-      { "command": "feishuCopilotHandoff.openSettings", "title": "Feishu Copilot Handoff: Open Settings" },
-      { "command": "feishuCopilotHandoff.persistTargetChatId", "title": "Feishu Copilot Handoff: Save Learned Target Chat ID" },
-      { "command": "feishuCopilotHandoff.status", "title": "Feishu Copilot Handoff: Status" }
+      {
+        "command": "feishuCopilotHandoff.start",
+        "title": "Feishu Copilot Handoff: Start"
+      },
+      {
+        "command": "feishuCopilotHandoff.stop",
+        "title": "Feishu Copilot Handoff: Stop"
+      },
+      {
+        "command": "feishuCopilotHandoff.restart",
+        "title": "Feishu Copilot Handoff: Restart"
+      },
+      {
+        "command": "feishuCopilotHandoff.openSettings",
+        "title": "Feishu Copilot Handoff: Open Settings"
+      },
+      {
+        "command": "feishuCopilotHandoff.persistTargetChatId",
+        "title": "Feishu Copilot Handoff: Save Learned Target Chat ID"
+      },
+      {
+        "command": "feishuCopilotHandoff.status",
+        "title": "Feishu Copilot Handoff: Status"
+      }
     ],
     "configuration": {
       "title": "Feishu Copilot Handoff",
