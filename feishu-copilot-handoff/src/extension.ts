@@ -85,6 +85,10 @@ export async function activate(
     storagePath = path.dirname(context.globalStorageUri.fsPath);
   }
 
+  console.log('[feishu-copilot-handoff] initialized with storagePath:', storagePath);
+  console.log('[feishu-copilot-handoff] context.storageUri:', context.storageUri?.fsPath);
+  console.log('[feishu-copilot-handoff] context.globalStorageUri:', context.globalStorageUri?.fsPath);
+
   const commandService = new ChatCommandService(
     (command: string, ...args: unknown[]) => cmds.executeCommand(command, ...args),
   );
@@ -120,13 +124,22 @@ export async function activate(
     }
     try {
       const files = await listChatSessionFiles(storagePath);
+      console.log('[feishu-copilot-handoff] refreshSessions found', files.length, 'session files at', storagePath);
       if (files.length === 0) {
         console.debug('[feishu-copilot-handoff] refreshSessions: no chat session files found at', storagePath);
+        // List directory contents for debugging
+        try {
+          const entries = await fs.readdir(storagePath, { withFileTypes: true });
+          console.log('[feishu-copilot-handoff] storagePath contents:', entries.map(e => `${e.name}${e.isDirectory() ? '/' : ''}`));
+        } catch (e) {
+          console.warn('[feishu-copilot-handoff] cannot list storagePath:', e instanceof Error ? e.message : String(e));
+        }
         return;
       }
       for (const filePath of files) {
         const stat = await fs.stat(filePath);
         const content = await fs.readFile(filePath, 'utf8');
+        console.log('[feishu-copilot-handoff] processing session file:', path.basename(filePath), 'size:', content.length, 'lines:', content.split('\n').length - 1);
         const summary = parseChatSessionJsonl(path.basename(filePath), content, stat.mtimeMs);
         await controller.handleSessionUpdate(summary);
       }
@@ -187,7 +200,9 @@ export async function activate(
       sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(config), chatId, text),
     });
 
+    console.log('[feishu-copilot-handoff] startBridge: initialized with targetChatId:', runtimeTargetChatId || 'pending');
     if (runtimeTargetChatId) {
+      console.log('[feishu-copilot-handoff] startBridge: loading existing sessions');
       await refreshSessions(controller);
     }
     activeController = controller;
@@ -195,6 +210,7 @@ export async function activate(
       clearInterval(sessionRefreshTimer);
     }
     // Poll chat session files so VS Code side updates are mirrored continuously.
+    console.log('[feishu-copilot-handoff] starting session refresh poll (1.5s interval)');
     sessionRefreshTimer = setInterval(() => {
       if (activeController) {
         void refreshSessions(activeController);

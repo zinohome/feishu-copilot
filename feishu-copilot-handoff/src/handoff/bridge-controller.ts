@@ -31,8 +31,16 @@ export class BridgeController {
       return;
     }
 
+    console.log('[bridge-controller] handleSessionUpdate:', {
+      sessionId: currentTarget.sessionId,
+      title: currentTarget.title,
+      turns: currentTarget.turns.length,
+      targetChatId: this.targetChatId,
+    });
+
     if (this.lastTargetSessionId !== currentTarget.sessionId) {
       this.lastTargetSessionId = currentTarget.sessionId;
+      console.log('[bridge-controller] session switched, sending switch message');
       await this.options.sendFeishuText(this.targetChatId, renderSessionSwitch(currentTarget));
     }
 
@@ -44,9 +52,11 @@ export class BridgeController {
     const signature = `${lastTurn.requestId}:${lastTurn.userText}:${lastTurn.assistantText}`;
     const lastMirrored = this.lastMirroredSignatureBySession.get(currentTarget.sessionId);
     if (lastMirrored === signature) {
+      console.log('[bridge-controller] message already mirrored, skipping');
       return;
     }
 
+    console.log('[bridge-controller] mirroring new message:', { signature });
     this.lastMirroredSignatureBySession.set(currentTarget.sessionId, signature);
     await this.options.sendFeishuText(this.targetChatId, renderMirroredTurn(currentTarget));
   }
