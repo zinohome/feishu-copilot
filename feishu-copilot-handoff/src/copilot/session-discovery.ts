@@ -5,6 +5,6 @@ export async function listChatSessionFiles(storagePath: string): Promise<string[
   const chatSessionsDir = path.join(storagePath, 'chatSessions');
   const entries = await fs.readdir(chatSessionsDir, { withFileTypes: true });
   return entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+    .filter((entry) => entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.jsonl')))
     .map((entry) => path.join(chatSessionsDir, entry.name));
 }

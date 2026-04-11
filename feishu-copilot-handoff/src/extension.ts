@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { readExtensionConfig } from './config';
 import { ChatCommandService } from './copilot/chat-command-service';
 import { listChatSessionFiles } from './copilot/session-discovery';
-import { parseChatSessionJsonl } from './copilot/session-parser';
+import { parseChatSessionJson, parseChatSessionJsonl } from './copilot/session-parser';
 import { getTenantAccessToken, sendFeishuText } from './feishu/client';
 import { startFeishuEventSource } from './feishu/event-source';
 import { BridgeController } from './handoff/bridge-controller';
@@ -139,8 +139,14 @@ export async function activate(
       for (const filePath of files) {
         const stat = await fs.stat(filePath);
         const content = await fs.readFile(filePath, 'utf8');
-        console.log('[feishu-copilot-handoff] processing session file:', path.basename(filePath), 'size:', content.length, 'lines:', content.split('\n').length - 1);
-        const summary = parseChatSessionJsonl(path.basename(filePath), content, stat.mtimeMs);
+        const fileName = path.basename(filePath);
+        console.log('[feishu-copilot-handoff] processing session file:', fileName, 'size:', content.length, 'lines:', content.split('\n').length - 1);
+        
+        // Choose parser based on file extension
+        const summary = fileName.endsWith('.json')
+          ? parseChatSessionJson(fileName, content, stat.mtimeMs)
+          : parseChatSessionJsonl(fileName, content, stat.mtimeMs);
+        
         await controller.handleSessionUpdate(summary);
       }
     } catch (err) {
