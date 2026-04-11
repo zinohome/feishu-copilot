@@ -5,7 +5,7 @@
   "publisher": "feishu-copilot",
   "displayName": "Feishu Copilot Handoff",
   "description": "Mirror the active Copilot Chat session to Feishu and accept remote handoff input.",
-  "main": "./dist/extension.js",
+  "main": "./dist/src/extension.js",
   "engines": {
     "vscode": "^1.100.0",
     "node": ">=22"
