@@ -22,6 +22,7 @@ describe('BridgeController mirror flow', () => {
     expect(sendText).toHaveBeenCalledWith(
       'oc_target',
       expect.stringContaining('React 重构'),
+      expect.any(Object),
     );
   });
 
@@ -52,7 +53,7 @@ describe('BridgeController mirror flow', () => {
       turns: [{ requestId: 'r2', userText: 'next', assistantText: 'turn', timestamp: 101 }],
     });
 
-    expect(sendText).toHaveBeenCalledWith('oc_runtime', expect.any(String));
+    expect(sendText).toHaveBeenCalledWith('oc_runtime', expect.any(String), expect.any(Object));
   });
 
   it('re-mirrors when the same requestId gets updated assistant text', async () => {
@@ -84,7 +85,7 @@ describe('BridgeController mirror flow', () => {
     // 1st update: switch + user msg + assistant('wo') = 3 calls
     // 2nd update: assistant updated to 'world' = 1 more call
     expect(sendText).toHaveBeenCalledTimes(4);
-    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'), expect.any(Object));
   });
 
   it('retries assistant send on next update when a previous assistant send failed', async () => {
@@ -112,7 +113,7 @@ describe('BridgeController mirror flow', () => {
     await controller.handleSessionUpdate(summary);
     await controller.handleSessionUpdate(summary);
 
-    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'), expect.any(Object));
   });
 
   it('keeps raw assistant content and retries on next update when send fails', async () => {
@@ -140,8 +141,8 @@ describe('BridgeController mirror flow', () => {
     await controller.handleSessionUpdate(summary);
     await controller.handleSessionUpdate(summary);
 
-    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('**ok** `done`'));
-    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('**ok** `done`'));
+    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('**ok** `done`'), expect.any(Object));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('**ok** `done`'), expect.any(Object));
   });
 
   it('retries user send on next update when a previous user send failed', async () => {
@@ -169,8 +170,8 @@ describe('BridgeController mirror flow', () => {
     await controller.handleSessionUpdate(summary);
     await controller.handleSessionUpdate(summary);
 
-    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('hello'));
-    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('hello'), expect.any(Object));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'), expect.any(Object));
   });
 
   it('still sends delayed assistant reply when a newer user turn already exists', async () => {

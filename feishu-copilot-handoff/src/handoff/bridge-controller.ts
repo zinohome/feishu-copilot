@@ -12,6 +12,7 @@ interface OutboundEvent {
   type: OutboundEventType;
   role: OutboundRole;
   payload: string;
+  assistantRaw?: string;
 }
 
 const BOOTSTRAP_TAIL_WINDOW = 12;
@@ -20,7 +21,11 @@ export interface BridgeControllerOptions {
   ownerOpenId: string;
   targetChatId?: string;
   maxMirroredSessions?: number;
-  sendFeishuText: (chatId: string, text: string) => Promise<string>;
+  sendFeishuText: (
+    chatId: string,
+    text: string,
+    meta?: { role: OutboundRole; type: OutboundEventType },
+  ) => Promise<string>;
 }
 
 export class BridgeController {
@@ -108,14 +113,17 @@ export class BridgeController {
         const event = this.outboundQueue[0];
 
         try {
-          await this.options.sendFeishuText(this.targetChatId, event.payload);
+          await this.options.sendFeishuText(this.targetChatId, event.payload, {
+            role: event.role,
+            type: event.type,
+          });
 
           // Ack event only after successful send.
           if (event.type === 'user-message' && event.reqKey) {
             this.sentUserReqKeys.add(event.reqKey);
           }
           if (event.type === 'assistant-message' && event.reqKey) {
-            this.lastSentAssistantByReqKey.set(event.reqKey, event.payload);
+            this.lastSentAssistantByReqKey.set(event.reqKey, event.assistantRaw ?? event.payload);
           }
 
           this.outboundQueue.shift();
@@ -215,6 +223,7 @@ export class BridgeController {
           type: 'assistant-message',
           role: 'assistant',
           payload: renderAssistantMessage(turn),
+          assistantRaw: turn.assistantText,
         });
       }
     }

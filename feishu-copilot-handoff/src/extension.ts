@@ -5,7 +5,7 @@ import { readExtensionConfig } from './config';
 import { ChatCommandService } from './copilot/chat-command-service';
 import { listChatSessionFiles } from './copilot/session-discovery';
 import { parseChatSessionJson, parseChatSessionJsonl } from './copilot/session-parser';
-import { getTenantAccessToken, sendFeishuText } from './feishu/client';
+import { getTenantAccessToken, sendFeishuMirrorMessage, sendFeishuText } from './feishu/client';
 import { startFeishuEventSource } from './feishu/event-source';
 import { BridgeController } from './handoff/bridge-controller';
 
@@ -242,7 +242,8 @@ export async function activate(
       ownerOpenId: config.ownerOpenId,
       targetChatId: runtimeTargetChatId,
       maxMirroredSessions: config.maxMirroredSessions,
-      sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(config), chatId, text),
+      sendFeishuText: async (chatId, text, meta) =>
+        sendFeishuMirrorMessage(await freshToken(config), chatId, text, meta),
     });
 
     console.log('[feishu-copilot-handoff] startBridge: initialized with targetChatId:', runtimeTargetChatId || 'pending');

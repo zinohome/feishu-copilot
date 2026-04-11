@@ -61,3 +61,53 @@ export async function sendFeishuText(
   );
   return result.data.message_id;
 }
+
+export type MirrorMessageMeta = {
+  role?: 'system' | 'user' | 'assistant';
+  type?: 'session-switch' | 'user-message' | 'assistant-message';
+};
+
+function buildInteractiveCard(text: string, role: 'user' | 'assistant') {
+  const card: {
+    config: { wide_screen_mode: boolean; enable_forward: boolean };
+    elements: Array<{ tag: 'markdown'; content: string }>;
+  } = {
+    config: {
+      wide_screen_mode: true,
+      enable_forward: true,
+    },
+    elements: [
+      {
+        tag: 'markdown',
+        content: text,
+      },
+    ],
+  };
+
+  return card;
+}
+
+export async function sendFeishuMirrorMessage(
+  token: string,
+  chatId: string,
+  text: string,
+  meta?: MirrorMessageMeta,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  if (meta?.type !== 'user-message' && meta?.type !== 'assistant-message') {
+    return sendFeishuText(token, chatId, text, fetchImpl);
+  }
+
+  const role = meta.type === 'user-message' ? 'user' : 'assistant';
+  const result = await postJson<{ data: { message_id: string } }>(
+    `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
+    {
+      receive_id: chatId,
+      msg_type: 'interactive',
+      content: JSON.stringify(buildInteractiveCard(text, role)),
+    },
+    token,
+    fetchImpl,
+  );
+  return result.data.message_id;
+}
