@@ -47,7 +47,7 @@
         "feishuCopilotHandoff.targetChatId": {
           "type": "string",
           "default": "",
-          "description": "Target Feishu chat_id where mirrored turns and command replies are sent."
+          "description": "Optional fixed target Feishu chat_id. If empty, the bridge auto-learns chat_id from the first authorized inbound message."
         },
         "feishuCopilotHandoff.statusCardEnabled": {
           "type": "boolean",

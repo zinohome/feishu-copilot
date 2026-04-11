@@ -27,7 +27,7 @@ function readLiveConfig(): ReturnType<typeof readExtensionConfig> {
 }
 
 function isConfigured(config: ReturnType<typeof readExtensionConfig>): boolean {
-  return Boolean(config.feishuAppId && config.feishuAppSecret && config.ownerOpenId && config.targetChatId);
+  return Boolean(config.feishuAppId && config.feishuAppSecret && config.ownerOpenId);
 }
 
 function updateStatusBar(): void {
@@ -45,6 +45,14 @@ function updateStatusBar(): void {
   }
 
   if (isConfigured(config)) {
+    if (!config.targetChatId) {
+      statusBarItem.text = '$(plug) Feishu Handoff: Waiting Target Chat';
+      statusBarItem.tooltip = 'Bridge can connect; waiting for first authorized inbound message to learn chat_id';
+      statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      statusBarItem.command = 'feishuCopilotHandoff.status';
+      return;
+    }
+
     statusBarItem.text = '$(debug-pause) Feishu Handoff: Stopped';
     statusBarItem.tooltip = 'Feishu Copilot Handoff is stopped\nClick for actions';
     statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
@@ -145,20 +153,24 @@ export async function activate(
     const config = readLiveConfig();
     if (!isConfigured(config)) {
       void vscode.window.showErrorMessage(
-        'Feishu Copilot Handoff: feishuAppId, feishuAppSecret, ownerOpenId, and targetChatId must all be configured.',
+        'Feishu Copilot Handoff: feishuAppId, feishuAppSecret, and ownerOpenId must all be configured.',
       );
       updateStatusBar();
       return;
     }
 
+    let runtimeTargetChatId = config.targetChatId;
+
     const controller = new BridgeController({
       ownerOpenId: config.ownerOpenId,
-      targetChatId: config.targetChatId,
+      targetChatId: runtimeTargetChatId,
       maxMirroredSessions: config.maxMirroredSessions,
       sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(config), chatId, text),
     });
 
-    await refreshSessions(controller);
+    if (runtimeTargetChatId) {
+      await refreshSessions(controller);
+    }
     activeController = controller;
     activeEventSource = startFeishuEventSource({
       appId: config.feishuAppId,
@@ -168,11 +180,19 @@ export async function activate(
           return;
         }
 
+        if (!runtimeTargetChatId) {
+          runtimeTargetChatId = message.chatId;
+          activeController.setTargetChatId(runtimeTargetChatId);
+          await refreshSessions(activeController);
+          void vscode.window.showInformationMessage(`Feishu Copilot Handoff learned target chat: ${runtimeTargetChatId}`);
+          updateStatusBar();
+        }
+
         const reply = await activeController.handleFeishuText(message.text, (text) =>
           commandService.submitToChat(text),
         );
         if (reply) {
-          await sendFeishuText(await freshToken(config), config.targetChatId, reply);
+          await sendFeishuText(await freshToken(config), runtimeTargetChatId || message.chatId, reply);
         }
       },
     });

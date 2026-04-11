@@ -4,7 +4,7 @@ import { renderMirroredTurn, renderSessionSwitch } from './feishu-renderer';
 
 export interface BridgeControllerOptions {
   ownerOpenId: string;
-  targetChatId: string;
+  targetChatId?: string;
   maxMirroredSessions?: number;
   sendFeishuText: (chatId: string, text: string) => Promise<string>;
 }
@@ -13,19 +13,27 @@ export class BridgeController {
   private readonly tracker = new ActiveSessionTracker();
   private lastMirroredRequestIdBySession = new Map<string, string>();
   private lastTargetSessionId: string | undefined;
+  private targetChatId: string | undefined;
 
-  constructor(private readonly options: BridgeControllerOptions) {}
+  constructor(private readonly options: BridgeControllerOptions) {
+    this.targetChatId = options.targetChatId?.trim() || undefined;
+  }
+
+  setTargetChatId(chatId: string): void {
+    const trimmed = chatId.trim();
+    this.targetChatId = trimmed || undefined;
+  }
 
   async handleSessionUpdate(summary: SessionSummary): Promise<void> {
     this.tracker.upsert(summary);
     const currentTarget = this.tracker.getCurrentTarget();
-    if (!currentTarget || currentTarget.sessionId !== summary.sessionId) {
+    if (!currentTarget || currentTarget.sessionId !== summary.sessionId || !this.targetChatId) {
       return;
     }
 
     if (this.lastTargetSessionId !== currentTarget.sessionId) {
       this.lastTargetSessionId = currentTarget.sessionId;
-      await this.options.sendFeishuText(this.options.targetChatId, renderSessionSwitch(currentTarget));
+      await this.options.sendFeishuText(this.targetChatId, renderSessionSwitch(currentTarget));
     }
 
     const lastTurn = currentTarget.turns.at(-1);
@@ -39,7 +47,7 @@ export class BridgeController {
     }
 
     this.lastMirroredRequestIdBySession.set(currentTarget.sessionId, lastTurn.requestId);
-    await this.options.sendFeishuText(this.options.targetChatId, renderMirroredTurn(currentTarget));
+    await this.options.sendFeishuText(this.targetChatId, renderMirroredTurn(currentTarget));
   }
 
   listRecentSessions(limit = this.options.maxMirroredSessions ?? 8): SessionSummary[] {
@@ -73,6 +81,7 @@ export class BridgeController {
     return [
       `mode: ${this.tracker.getMode()}`,
       `session: ${target?.title ?? 'none'}`,
+      `targetChatId: ${this.targetChatId ?? 'auto-pending'}`,
     ].join('\n');
   }
 
