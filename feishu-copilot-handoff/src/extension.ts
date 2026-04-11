@@ -19,6 +19,44 @@ export interface ActivateDeps {
 
 // Module-level so deactivate() can clean up even without a closure
 let activeEventSource: { dispose: () => void } | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
+let activeController: BridgeController | undefined;
+
+function readLiveConfig(): ReturnType<typeof readExtensionConfig> {
+  return readExtensionConfig(vscode.workspace.getConfiguration('feishuCopilotHandoff'));
+}
+
+function isConfigured(config: ReturnType<typeof readExtensionConfig>): boolean {
+  return Boolean(config.feishuAppId && config.feishuAppSecret && config.ownerOpenId && config.targetChatId);
+}
+
+function updateStatusBar(): void {
+  if (!statusBarItem) {
+    return;
+  }
+
+  const config = readLiveConfig();
+  if (activeEventSource) {
+    statusBarItem.text = '$(radio-tower) Feishu Handoff: Running';
+    statusBarItem.tooltip = 'Feishu Copilot Handoff is running\nClick for actions';
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.command = 'feishuCopilotHandoff.status';
+    return;
+  }
+
+  if (isConfigured(config)) {
+    statusBarItem.text = '$(debug-pause) Feishu Handoff: Stopped';
+    statusBarItem.tooltip = 'Feishu Copilot Handoff is stopped\nClick for actions';
+    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    statusBarItem.command = 'feishuCopilotHandoff.status';
+    return;
+  }
+
+  statusBarItem.text = '$(gear) Feishu Handoff: Not Configured';
+  statusBarItem.tooltip = 'Feishu Copilot Handoff is not configured\nClick for actions';
+  statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  statusBarItem.command = 'feishuCopilotHandoff.status';
+}
 
 export async function activate(
   context: vscode.ExtensionContext,
@@ -32,12 +70,6 @@ export async function activate(
     deps?.workspaceStoragePath ??
     (context.storageUri ? path.dirname(context.storageUri.fsPath) : '');
 
-  const config = readExtensionConfig(
-    vscode.workspace?.getConfiguration?.('feishuCopilotHandoff') ?? {
-      get<T>(_key: string, defaultValue: T): T { return defaultValue; },
-    },
-  );
-
   const commandService = new ChatCommandService(
     (command: string, ...args: unknown[]) => cmds.executeCommand(command, ...args),
   );
@@ -45,11 +77,20 @@ export async function activate(
   // Fix #2: lazy token refresh — Feishu tokens expire in ~2 hours.
   let cachedToken = '';
   let tokenExpiresAt = 0;
+  let cachedCredentialKey = '';
 
-  async function freshToken(): Promise<string> {
+  async function freshToken(config: ReturnType<typeof readExtensionConfig>): Promise<string> {
     if (!config.feishuAppId || !config.feishuAppSecret) {
       return '';
     }
+
+    const credentialKey = `${config.feishuAppId}::${config.feishuAppSecret}`;
+    if (credentialKey !== cachedCredentialKey) {
+      cachedCredentialKey = credentialKey;
+      cachedToken = '';
+      tokenExpiresAt = 0;
+    }
+
     if (!cachedToken || Date.now() > tokenExpiresAt) {
       cachedToken = await getTenantAccessToken(config.feishuAppId, config.feishuAppSecret);
       tokenExpiresAt = Date.now() + 100 * 60 * 1000; // refresh conservatively at 100 min
@@ -57,14 +98,7 @@ export async function activate(
     return cachedToken;
   }
 
-  const controller = new BridgeController({
-    ownerOpenId: config.ownerOpenId,
-    targetChatId: config.targetChatId,
-    maxMirroredSessions: config.maxMirroredSessions,
-    sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(), chatId, text),
-  });
-
-  async function refreshSessions(): Promise<void> {
+  async function refreshSessions(controller: BridgeController): Promise<void> {
     if (!storagePath) {
       return;
     }
@@ -81,46 +115,163 @@ export async function activate(
     }
   }
 
-  context.subscriptions.push(
-    cmds.registerCommand('feishuCopilotHandoff.start', async () => {
-      // Fix #6: validate required config fields before attempting to connect
-      if (!config.feishuAppId || !config.feishuAppSecret || !config.ownerOpenId || !config.targetChatId) {
-        void vscode.window?.showErrorMessage?.(
-          'Feishu Copilot Handoff: feishuAppId, feishuAppSecret, ownerOpenId, and targetChatId must all be configured.',
+  async function stopBridge(showToast = true): Promise<void> {
+    if (!activeEventSource) {
+      if (showToast) {
+        void vscode.window.showInformationMessage('Feishu Copilot Handoff is already stopped');
+      }
+      updateStatusBar();
+      return;
+    }
+
+    activeEventSource.dispose();
+    activeEventSource = undefined;
+    activeController = undefined;
+    if (showToast) {
+      void vscode.window.showInformationMessage('Feishu Copilot Handoff stopped');
+    }
+    updateStatusBar();
+  }
+
+  async function startBridge(showToast = true): Promise<void> {
+    if (activeEventSource) {
+      if (showToast) {
+        void vscode.window.showInformationMessage('Feishu Copilot Handoff is already running');
+      }
+      updateStatusBar();
+      return;
+    }
+
+    const config = readLiveConfig();
+    if (!isConfigured(config)) {
+      void vscode.window.showErrorMessage(
+        'Feishu Copilot Handoff: feishuAppId, feishuAppSecret, ownerOpenId, and targetChatId must all be configured.',
+      );
+      updateStatusBar();
+      return;
+    }
+
+    const controller = new BridgeController({
+      ownerOpenId: config.ownerOpenId,
+      targetChatId: config.targetChatId,
+      maxMirroredSessions: config.maxMirroredSessions,
+      sendFeishuText: async (chatId, text) => sendFeishuText(await freshToken(config), chatId, text),
+    });
+
+    await refreshSessions(controller);
+    activeController = controller;
+    activeEventSource = startFeishuEventSource({
+      appId: config.feishuAppId,
+      appSecret: config.feishuAppSecret,
+      onMessage: async (message) => {
+        if (message.senderOpenId !== config.ownerOpenId || !activeController) {
+          return;
+        }
+
+        const reply = await activeController.handleFeishuText(message.text, (text) =>
+          commandService.submitToChat(text),
         );
+        if (reply) {
+          await sendFeishuText(await freshToken(config), config.targetChatId, reply);
+        }
+      },
+    });
+
+    if (showToast) {
+      void vscode.window.showInformationMessage('Feishu Copilot Handoff started');
+    }
+    updateStatusBar();
+  }
+
+  async function restartBridge(showToast = true): Promise<void> {
+    await stopBridge(false);
+    await startBridge(false);
+    if (showToast) {
+      void vscode.window.showInformationMessage('Feishu Copilot Handoff restarted');
+    }
+    updateStatusBar();
+  }
+
+  async function openSettings(): Promise<void> {
+    await cmds.executeCommand('workbench.action.openSettings', 'feishuCopilotHandoff');
+  }
+
+  async function showStatusActions(): Promise<void> {
+    const options: vscode.QuickPickItem[] = [
+      { label: '$(play) Start Bridge', description: 'Start Feishu handoff connection' },
+      { label: '$(stop) Stop Bridge', description: 'Stop Feishu handoff connection' },
+      { label: '$(debug-restart) Restart Bridge', description: 'Restart Feishu handoff connection' },
+      { label: '$(gear) Open Settings', description: 'Open Feishu Copilot Handoff settings' },
+      { label: '$(info) Show Runtime Status', description: 'Show current mode and active target' },
+    ];
+
+    const picked = await vscode.window.showQuickPick(options, {
+      placeHolder: 'Feishu Copilot Handoff actions',
+      ignoreFocusOut: true,
+    });
+
+    if (!picked) {
+      return;
+    }
+
+    if (picked.label.includes('Start Bridge')) {
+      await startBridge();
+      return;
+    }
+
+    if (picked.label.includes('Stop Bridge')) {
+      await stopBridge();
+      return;
+    }
+
+    if (picked.label.includes('Restart Bridge')) {
+      await restartBridge();
+      return;
+    }
+
+    if (picked.label.includes('Open Settings')) {
+      await openSettings();
+      return;
+    }
+
+    const statusText = activeController?.getStatusText() ?? 'mode: follow-latest\nsession: none';
+    void vscode.window.showInformationMessage(statusText);
+  }
+
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration('feishuCopilotHandoff')) {
         return;
       }
 
-      await refreshSessions();
-      activeEventSource = startFeishuEventSource({
-        appId: config.feishuAppId,
-        appSecret: config.feishuAppSecret,
-        onMessage: async (message) => {
-          if (message.senderOpenId !== config.ownerOpenId) {
-            return;
-          }
-          const reply = await controller.handleFeishuText(message.text, (text) =>
-            commandService.submitToChat(text),
-          );
-          if (reply) {
-            await sendFeishuText(await freshToken(), config.targetChatId, reply);
-          }
-        },
-      });
-    }),
-    cmds.registerCommand('feishuCopilotHandoff.stop', async () => {
-      activeEventSource?.dispose();
-      activeEventSource = undefined;
-    }),
-    cmds.registerCommand('feishuCopilotHandoff.status', async () => {
-      void vscode.window?.showInformationMessage?.(controller.getStatusText());
+      updateStatusBar();
+      if (activeEventSource) {
+        void restartBridge(false);
+      }
     }),
   );
+
+  context.subscriptions.push(
+    cmds.registerCommand('feishuCopilotHandoff.start', () => startBridge()),
+    cmds.registerCommand('feishuCopilotHandoff.stop', () => stopBridge()),
+    cmds.registerCommand('feishuCopilotHandoff.restart', () => restartBridge()),
+    cmds.registerCommand('feishuCopilotHandoff.openSettings', () => openSettings()),
+    cmds.registerCommand('feishuCopilotHandoff.status', () => showStatusActions()),
+  );
+
+  updateStatusBar();
 }
 
 // Fix #4: close the WebSocket connection when the extension is deactivated
 export function deactivate(): void {
   activeEventSource?.dispose();
   activeEventSource = undefined;
+  activeController = undefined;
+  statusBarItem?.dispose();
+  statusBarItem = undefined;
 }
 

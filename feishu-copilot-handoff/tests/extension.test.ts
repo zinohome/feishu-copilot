@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { activate } from '../src/extension';
+import * as vscode from 'vscode';
 
 describe('activate', () => {
-  it('registers start, stop, and status commands', async () => {
+  it('registers lifecycle and utility commands, and creates status bar item', async () => {
     const subscriptions: { dispose: () => void }[] = [];
     const commands = {
       registerCommand: vi.fn((_id: string, handler: () => unknown) => {
@@ -23,6 +24,9 @@ describe('activate', () => {
 
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.start', expect.any(Function));
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.stop', expect.any(Function));
+    expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.restart', expect.any(Function));
+    expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.openSettings', expect.any(Function));
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.status', expect.any(Function));
+    expect(vscode.window.createStatusBarItem).toHaveBeenCalledTimes(1);
   });
 });

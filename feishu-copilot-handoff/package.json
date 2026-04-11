@@ -14,23 +14,53 @@
     "onStartupFinished",
     "onCommand:feishuCopilotHandoff.start",
     "onCommand:feishuCopilotHandoff.stop",
+    "onCommand:feishuCopilotHandoff.restart",
+    "onCommand:feishuCopilotHandoff.openSettings",
     "onCommand:feishuCopilotHandoff.status"
   ],
   "contributes": {
     "commands": [
       { "command": "feishuCopilotHandoff.start", "title": "Feishu Copilot Handoff: Start" },
       { "command": "feishuCopilotHandoff.stop", "title": "Feishu Copilot Handoff: Stop" },
+      { "command": "feishuCopilotHandoff.restart", "title": "Feishu Copilot Handoff: Restart" },
+      { "command": "feishuCopilotHandoff.openSettings", "title": "Feishu Copilot Handoff: Open Settings" },
       { "command": "feishuCopilotHandoff.status", "title": "Feishu Copilot Handoff: Status" }
     ],
     "configuration": {
       "title": "Feishu Copilot Handoff",
       "properties": {
-        "feishuCopilotHandoff.feishuAppId": { "type": "string", "default": "" },
-        "feishuCopilotHandoff.feishuAppSecret": { "type": "string", "default": "" },
-        "feishuCopilotHandoff.ownerOpenId": { "type": "string", "default": "" },
-        "feishuCopilotHandoff.targetChatId": { "type": "string", "default": "" },
-        "feishuCopilotHandoff.statusCardEnabled": { "type": "boolean", "default": true },
-        "feishuCopilotHandoff.maxMirroredSessions": { "type": "number", "default": 8 }
+        "feishuCopilotHandoff.feishuAppId": {
+          "type": "string",
+          "default": "",
+          "description": "Feishu application app_id (required)."
+        },
+        "feishuCopilotHandoff.feishuAppSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Feishu application app_secret (required)."
+        },
+        "feishuCopilotHandoff.ownerOpenId": {
+          "type": "string",
+          "default": "",
+          "description": "Allowed Feishu sender open_id. Messages from other senders are ignored."
+        },
+        "feishuCopilotHandoff.targetChatId": {
+          "type": "string",
+          "default": "",
+          "description": "Target Feishu chat_id where mirrored turns and command replies are sent."
+        },
+        "feishuCopilotHandoff.statusCardEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reserved for future status card rendering support."
+        },
+        "feishuCopilotHandoff.maxMirroredSessions": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of recent sessions shown in /sessions and status views."
+        }
       }
     }
   },
