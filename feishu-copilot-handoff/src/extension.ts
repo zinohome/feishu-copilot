@@ -76,9 +76,14 @@ export async function activate(
 
   // Fix #1: chatSessions/ lives at the workspace storage root, one level above the
   // extension's own private folder (context.storageUri.fsPath).
-  const storagePath =
+  let storagePath =
     deps?.workspaceStoragePath ??
     (context.storageUri ? path.dirname(context.storageUri.fsPath) : '');
+
+  // Fallback: if storagePath is empty or doesn't contain chatSessions, try globalStorageUri
+  if (!storagePath && context.globalStorageUri) {
+    storagePath = path.dirname(context.globalStorageUri.fsPath);
+  }
 
   const commandService = new ChatCommandService(
     (command: string, ...args: unknown[]) => cmds.executeCommand(command, ...args),
@@ -110,18 +115,25 @@ export async function activate(
 
   async function refreshSessions(controller: BridgeController): Promise<void> {
     if (!storagePath) {
+      console.warn('[feishu-copilot-handoff] refreshSessions: storagePath is empty, cannot load chat sessions');
       return;
     }
     try {
       const files = await listChatSessionFiles(storagePath);
+      if (files.length === 0) {
+        console.debug('[feishu-copilot-handoff] refreshSessions: no chat session files found at', storagePath);
+        return;
+      }
       for (const filePath of files) {
         const stat = await fs.stat(filePath);
         const content = await fs.readFile(filePath, 'utf8');
         const summary = parseChatSessionJsonl(path.basename(filePath), content, stat.mtimeMs);
         await controller.handleSessionUpdate(summary);
       }
-    } catch {
-      // storage path may not exist yet
+    } catch (err) {
+      // storage path may not exist yet, or chatSessions dir doesn't exist
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[feishu-copilot-handoff] refreshSessions error:', errorMsg, 'path:', storagePath);
     }
   }
 
@@ -197,12 +209,23 @@ export async function activate(
           return;
         }
 
+        // Track the chat ID from the most recent inbound message.
+        // This allows users to switch target chats in Feishu dynamically.
+        const previousTargetChatId = runtimeTargetChatId;
         if (!runtimeTargetChatId) {
           runtimeTargetChatId = message.chatId;
           learnedTargetChatId = runtimeTargetChatId;
           activeController.setTargetChatId(runtimeTargetChatId);
           await refreshSessions(activeController);
           void vscode.window.showInformationMessage(`Feishu Copilot Handoff learned target chat: ${runtimeTargetChatId}`);
+          updateStatusBar();
+        } else if (message.chatId !== runtimeTargetChatId) {
+          // User switched to a different Feishu chat. Update target and sync current session.
+          runtimeTargetChatId = message.chatId;
+          learnedTargetChatId = runtimeTargetChatId;
+          activeController.setTargetChatId(runtimeTargetChatId);
+          await refreshSessions(activeController);
+          void vscode.window.showInformationMessage(`Feishu Copilot Handoff switched to new chat: ${runtimeTargetChatId}`);
           updateStatusBar();
         }
 

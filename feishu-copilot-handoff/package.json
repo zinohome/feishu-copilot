@@ -1,6 +1,6 @@
 {
   "name": "feishu-copilot-handoff",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "publisher": "feishu-copilot",
   "displayName": "Feishu Copilot Handoff",
