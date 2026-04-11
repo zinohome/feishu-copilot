@@ -27,6 +27,7 @@ export class BridgeController {
   private readonly tracker = new ActiveSessionTracker();
   private sentUserReqKeys = new Set<string>();
   private lastSentAssistantByReqKey = new Map<string, string>();
+  private pendingRemoteUserTexts = new Map<string, number>();
   private processedTurnCountBySession = new Map<string, number>();
   private outboundQueue: OutboundEvent[] = [];
   private queuedEventIds = new Set<string>();
@@ -41,6 +42,35 @@ export class BridgeController {
   setTargetChatId(chatId: string): void {
     const trimmed = chatId.trim();
     this.targetChatId = trimmed || undefined;
+  }
+
+  private normalizeUserText(text: string): string {
+    return text.replace(/\r\n/g, '\n').trim();
+  }
+
+  private markRemoteUserText(text: string): void {
+    const normalized = this.normalizeUserText(text);
+    if (!normalized) {
+      return;
+    }
+    this.pendingRemoteUserTexts.set(normalized, (this.pendingRemoteUserTexts.get(normalized) ?? 0) + 1);
+  }
+
+  private consumeRemoteUserText(text: string): boolean {
+    const normalized = this.normalizeUserText(text);
+    if (!normalized) {
+      return false;
+    }
+    const count = this.pendingRemoteUserTexts.get(normalized) ?? 0;
+    if (count <= 0) {
+      return false;
+    }
+    if (count === 1) {
+      this.pendingRemoteUserTexts.delete(normalized);
+    } else {
+      this.pendingRemoteUserTexts.set(normalized, count - 1);
+    }
+    return true;
   }
 
   private enqueueEvent(event: OutboundEvent): void {
@@ -157,15 +187,20 @@ export class BridgeController {
 
       // Send user message when a new request arrives
       if (!this.sentUserReqKeys.has(reqKey) && turn.userText) {
-        console.log('[bridge-controller] sending user message for requestId:', turn.requestId);
-        this.enqueueEvent({
-          id: `user:${reqKey}`,
-          sessionId: target.sessionId,
-          reqKey,
-          type: 'user-message',
-          role: 'user',
-          payload: renderUserMessage(turn),
-        });
+        if (this.consumeRemoteUserText(turn.userText)) {
+          // This user text was submitted from Feishu already, so avoid echoing it back.
+          this.sentUserReqKeys.add(reqKey);
+        } else {
+          console.log('[bridge-controller] sending user message for requestId:', turn.requestId);
+          this.enqueueEvent({
+            id: `user:${reqKey}`,
+            sessionId: target.sessionId,
+            reqKey,
+            type: 'user-message',
+            role: 'user',
+            payload: renderUserMessage(turn),
+          });
+        }
       }
 
       // Send assistant reply when content arrives or changes
@@ -248,6 +283,7 @@ export class BridgeController {
     }
 
     await submitToChat(text);
+    this.markRemoteUserText(text);
     return undefined;
   }
 }

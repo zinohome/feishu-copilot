@@ -207,6 +207,38 @@ describe('BridgeController mirror flow', () => {
     expect(sentPayloads.some((p) => p.includes('A1'))).toBe(true);
     expect(sentPayloads.some((p) => p.includes('Q2'))).toBe(true);
   });
+
+  it('does not echo Feishu-originated user text back to Feishu', async () => {
+    const sendText = vi.fn().mockResolvedValue('msg_1');
+    const submitToChat = vi.fn().mockResolvedValue(undefined);
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: sendText,
+    });
+
+    await controller.handleFeishuText('这是飞书端发过来的消息', submitToChat);
+
+    await controller.handleSessionUpdate({
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 100,
+      lastAssistantMessageAt: 101,
+      lastFileWriteAt: 101,
+      turns: [
+        {
+          requestId: 'r1',
+          userText: '这是飞书端发过来的消息',
+          assistantText: '我收到了',
+          timestamp: 100,
+        },
+      ],
+    });
+
+    const sentPayloads = sendText.mock.calls.map((args) => String(args[1]));
+    expect(sentPayloads.some((p) => p.includes('这是飞书端发过来的消息'))).toBe(false);
+    expect(sentPayloads.some((p) => p.includes('我收到了'))).toBe(true);
+  });
 });
 
 describe('BridgeController remote commands', () => {
