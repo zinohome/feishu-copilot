@@ -224,7 +224,7 @@ async function showStatusMenu(): Promise<void> {
       [
         { label: 'Stop Bridge', description: 'Stop Feishu WebSocket bridge', action: 'stop' },
         { label: 'Restart Bridge', description: 'Restart bridge connection', action: 'restart' },
-        { label: 'Open Settings', description: 'Configure appId / appSecret', action: 'settings' },
+        { label: 'Open Settings', description: 'Set feishuCopilot Configs', action: 'settings' },
       ],
       {
         title: 'Feishu Copilot Status',
@@ -252,7 +252,7 @@ async function showStatusMenu(): Promise<void> {
     const picked = await vscode.window.showQuickPick(
       [
         { label: 'Start Bridge', description: 'Start Feishu WebSocket bridge', action: 'start' },
-        { label: 'Open Settings', description: 'Configure appId / appSecret', action: 'settings' },
+        { label: 'Open Settings', description: 'Set feishuCopilot Configs', action: 'settings' },
       ],
       {
         title: 'Feishu Copilot Status',
@@ -273,7 +273,7 @@ async function showStatusMenu(): Promise<void> {
 
   const picked = await vscode.window.showQuickPick(
     [
-      { label: 'Open Settings', description: 'Set feishuAppId and feishuAppSecret', action: 'settings' },
+      { label: 'Open Settings', description: 'Set feishuCopilot Configs', action: 'settings' },
       { label: 'Start Bridge', description: 'Try starting now', action: 'start' },
     ],
     {
@@ -318,7 +318,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
 
   const settingsCmd = vscode.commands.registerCommand('feishu-copilot.openSettings', async () => {
-    await vscode.commands.executeCommand('workbench.action.openSettings', 'feishuCopilot');
+    await vscode.commands.executeCommand(
+      'workbench.action.openSettings',
+      '@ext:feishu-copilot.feishu-copilot-bridge feishuCopilot',
+    );
   });
 
   const configWatcher = vscode.workspace.onDidChangeConfiguration((evt) => {
