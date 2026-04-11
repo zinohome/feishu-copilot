@@ -11,7 +11,7 @@ export interface BridgeControllerOptions {
 
 export class BridgeController {
   private readonly tracker = new ActiveSessionTracker();
-  private lastMirroredRequestIdBySession = new Map<string, string>();
+  private lastMirroredSignatureBySession = new Map<string, string>();
   private lastTargetSessionId: string | undefined;
   private targetChatId: string | undefined;
 
@@ -41,12 +41,13 @@ export class BridgeController {
       return;
     }
 
-    const lastMirrored = this.lastMirroredRequestIdBySession.get(currentTarget.sessionId);
-    if (lastMirrored === lastTurn.requestId) {
+    const signature = `${lastTurn.requestId}:${lastTurn.userText}:${lastTurn.assistantText}`;
+    const lastMirrored = this.lastMirroredSignatureBySession.get(currentTarget.sessionId);
+    if (lastMirrored === signature) {
       return;
     }
 
-    this.lastMirroredRequestIdBySession.set(currentTarget.sessionId, lastTurn.requestId);
+    this.lastMirroredSignatureBySession.set(currentTarget.sessionId, signature);
     await this.options.sendFeishuText(this.targetChatId, renderMirroredTurn(currentTarget));
   }
 

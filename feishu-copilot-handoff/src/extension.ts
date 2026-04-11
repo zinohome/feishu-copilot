@@ -22,6 +22,7 @@ let activeEventSource: { dispose: () => void } | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let activeController: BridgeController | undefined;
 let learnedTargetChatId: string | undefined;
+let sessionRefreshTimer: NodeJS.Timeout | undefined;
 
 function readLiveConfig(): ReturnType<typeof readExtensionConfig> {
   return readExtensionConfig(vscode.workspace.getConfiguration('feishuCopilotHandoff'));
@@ -136,6 +137,10 @@ export async function activate(
     activeEventSource.dispose();
     activeEventSource = undefined;
     activeController = undefined;
+    if (sessionRefreshTimer) {
+      clearInterval(sessionRefreshTimer);
+      sessionRefreshTimer = undefined;
+    }
     if (showToast) {
       void vscode.window.showInformationMessage('Feishu Copilot Handoff stopped');
     }
@@ -174,6 +179,16 @@ export async function activate(
       await refreshSessions(controller);
     }
     activeController = controller;
+    if (sessionRefreshTimer) {
+      clearInterval(sessionRefreshTimer);
+    }
+    // Poll chat session files so VS Code side updates are mirrored continuously.
+    sessionRefreshTimer = setInterval(() => {
+      if (activeController) {
+        void refreshSessions(activeController);
+      }
+    }, 1500);
+
     activeEventSource = startFeishuEventSource({
       appId: config.feishuAppId,
       appSecret: config.feishuAppSecret,
@@ -312,6 +327,10 @@ export function deactivate(): void {
   activeEventSource = undefined;
   activeController = undefined;
   learnedTargetChatId = undefined;
+  if (sessionRefreshTimer) {
+    clearInterval(sessionRefreshTimer);
+    sessionRefreshTimer = undefined;
+  }
   statusBarItem?.dispose();
   statusBarItem = undefined;
 }
