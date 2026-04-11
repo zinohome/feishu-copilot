@@ -1,0 +1,49 @@
+[
+  {
+    "id": "feishu-1775879656551-22p59",
+    "feishuKey": "oc_317a6db52a1b3557ac2d6b9dd33f5060",
+    "label": "飞书 oc_317a6db52",
+    "selectedAgentId": "superpowers",
+    "createdAt": 1775879656551,
+    "lastActiveAt": 1775879680633,
+    "messages": [
+      {
+        "role": "user",
+        "text": "/new",
+        "timestampMs": 1775879656268,
+        "source": "feishu"
+      },
+      {
+        "role": "assistant",
+        "text": "Sorry, I can't assist with that.",
+        "timestampMs": 1775879658543,
+        "source": "feishu"
+      },
+      {
+        "role": "user",
+        "text": "你不能更新会话吗？",
+        "timestampMs": 1775879669562,
+        "source": "feishu"
+      },
+      {
+        "role": "assistant",
+        "text": "抱歉，我无法协助完成此操作。",
+        "timestampMs": 1775879671560,
+        "source": "feishu"
+      },
+      {
+        "role": "user",
+        "text": "那你能做什么？",
+        "timestampMs": 1775879678214,
+        "source": "feishu"
+      },
+      {
+        "role": "assistant",
+        "text": "我可以帮助回答问题、提供技术支持、协助编程、解释概念、解决问题等。如果你有具体的需求或问题，请告诉我！",
+        "timestampMs": 1775879680633,
+        "source": "feishu"
+      }
+    ],
+    "archived": false
+  }
+]

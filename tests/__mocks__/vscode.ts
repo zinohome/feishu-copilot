@@ -77,6 +77,22 @@ class ThemeIcon {
   constructor(public id: string) {}
 }
 
+class Uri {
+  constructor(public scheme: string, public path: string, public query: string = '') {}
+
+  static from(components: { scheme: string; path: string }) {
+    return new Uri(components.scheme, components.path);
+  }
+
+  with(changes: { scheme?: string; path?: string; query?: string }) {
+    return new Uri(
+      changes.scheme ?? this.scheme,
+      changes.path ?? this.path,
+      changes.query ?? this.query,
+    );
+  }
+}
+
 class MarkdownString {
   constructor(public value: string) {}
 }
@@ -108,6 +124,29 @@ class CancellationTokenSource {
   dispose() {}
 }
 
+class EventEmitter<T = unknown> {
+  private listeners = new Set<(event: T) => unknown>();
+
+  event = (listener: (event: T) => unknown) => {
+    this.listeners.add(listener);
+    return {
+      dispose: () => {
+        this.listeners.delete(listener);
+      },
+    };
+  };
+
+  fire(data: T) {
+    for (const listener of this.listeners) {
+      listener(data);
+    }
+  }
+
+  dispose() {
+    this.listeners.clear();
+  }
+}
+
 const lm = {
   selectChatModels: vi.fn(async (_selector?: unknown) => [
     {
@@ -128,6 +167,7 @@ export {
   StatusBarAlignment,
   ThemeColor,
   ThemeIcon,
+  Uri,
   lm,
   __setConfig,
   __resetConfig,
@@ -137,6 +177,7 @@ export {
   LanguageModelTextPart,
   LanguageModelChatMessage,
   CancellationTokenSource,
+  EventEmitter,
 };
 export default {
   commands,
@@ -145,6 +186,7 @@ export default {
   StatusBarAlignment,
   ThemeColor,
   ThemeIcon,
+  Uri,
   lm,
   __setConfig,
   __resetConfig,
@@ -154,4 +196,5 @@ export default {
   LanguageModelTextPart,
   LanguageModelChatMessage,
   CancellationTokenSource,
+  EventEmitter,
 };

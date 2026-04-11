@@ -4,6 +4,7 @@ import type { CopilotAdapter } from '../copilot/copilot-adapter';
 import type { InboundChatMessage } from '../domain/message-types';
 import { sendCard, sendText, updateCard } from '../feishu/feishu-client';
 import { SessionRouter } from '../session/session-router';
+import { buildPromptWithSessionHistory } from '../session/session-prompt-context';
 import type { SessionStore } from '../session/session-store';
 import type { FeishuChatSessionManager } from '../session/feishu-chat-session-manager';
 import type { AgentRegistry } from '../agent/agent-registry';
@@ -79,12 +80,14 @@ export class Pipeline {
 
     // c2. Resolve shared session state when session store is enabled
     let sessionId: string | undefined;
+    let sessionMessages: InboundChatMessage['text'] extends string ? { role: 'user' | 'assistant'; text: string; timestampMs: number; source: 'feishu' | 'vscode' }[] | undefined : undefined;
     let selectedAgentId = agentRegistry?.getDefaultAgentId() ?? 'superpowers';
     const feishuKey = event.message.chat_id || event.sender.open_id;
     if (sessionStore) {
       const label = `飞书 ${feishuKey.slice(0, 12)}`;
       const session = sessionStore.getOrCreate(feishuKey, label);
       sessionId = session.id;
+      sessionMessages = session.messages;
       selectedAgentId = session.selectedAgentId || (agentRegistry?.getDefaultAgentId() ?? 'superpowers');
 
       // Auto-heal stale session agent ids (e.g. skill removed or source path changed)
@@ -188,12 +191,16 @@ export class Pipeline {
 
       // g. Resolve agent and stream chunks into renderer
       const runnableAgent = agentRegistry?.getRunnableById(selectedAgentId);
+      const rawPrompt = buildPromptWithSessionHistory(sessionMessages, message.text);
       const effectiveMessage: InboundChatMessage = runnableAgent?.systemPrompt
         ? {
             ...message,
-            text: `[Agent: ${runnableAgent.id}]\n${runnableAgent.systemPrompt}\n\nUser request:\n${message.text}`,
+            text: `[Agent: ${runnableAgent.id}]\n${runnableAgent.systemPrompt}\n\nUser request:\n${rawPrompt}`,
           }
-        : message;
+        : {
+            ...message,
+            text: rawPrompt,
+          };
 
       const chunks = await copilot.generate(effectiveMessage, requestState.abortController.signal);
       for await (const chunk of chunks) {

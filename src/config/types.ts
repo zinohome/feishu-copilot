@@ -3,4 +3,6 @@ export interface BridgeConfig {
   workspaceAllowlist: string[];
   approvalTimeoutMs: number;
   cardPatchIntervalMs: number;
+  sharedStorePath: string;
+  allowGlobalStorageFallback: boolean;
 }

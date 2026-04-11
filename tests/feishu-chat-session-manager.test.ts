@@ -1,8 +1,76 @@
+import * as vscode from 'vscode';
 import { describe, expect, it, vi } from 'vitest';
 import { FeishuChatSessionManager } from '../src/session/feishu-chat-session-manager';
 import type { InboundChatMessage } from '../src/domain/message-types';
 
 describe('FeishuChatSessionManager', () => {
+  it('reopens the currently opened session when feishu appends new messages', async () => {
+    const replace = vi.fn();
+    const executeCommand = vi.mocked(vscode.commands.executeCommand);
+    executeCommand.mockClear();
+
+    const store = {
+      list: vi.fn(() => [
+        {
+          id: 's1',
+          feishuKey: 'chat-1',
+          label: 'Session 1',
+          selectedAgentId: 'superpowers',
+          createdAt: 1,
+          lastActiveAt: 2,
+          messages: [],
+          archived: false,
+        },
+      ]),
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, {} as any, {} as any);
+    (manager as any).controller = {
+      items: { replace },
+      createChatSessionItem: vi.fn((_resource: unknown, label: string) => ({ label })),
+    };
+    (manager as any).lastOpenedSessionId = 's1';
+
+    await (manager as any).handleStoreChange({
+      sessionId: 's1',
+      reason: 'append',
+      messageSource: 'feishu',
+    });
+
+    expect(replace).toHaveBeenCalledOnce();
+    expect(executeCommand).toHaveBeenCalledWith(
+      'vscode.open',
+      expect.objectContaining({ scheme: 'feishu-session', path: '/s1' }),
+      expect.objectContaining({ preview: false, preserveFocus: true }),
+    );
+  });
+
+  it('does not reopen the session for non-feishu updates', async () => {
+    const replace = vi.fn();
+    const executeCommand = vi.mocked(vscode.commands.executeCommand);
+    executeCommand.mockClear();
+
+    const store = {
+      list: vi.fn(() => []),
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, {} as any, {} as any);
+    (manager as any).controller = {
+      items: { replace },
+      createChatSessionItem: vi.fn(),
+    };
+    (manager as any).lastOpenedSessionId = 's1';
+
+    await (manager as any).handleStoreChange({
+      sessionId: 's1',
+      reason: 'append',
+      messageSource: 'vscode',
+    });
+
+    expect(replace).toHaveBeenCalledOnce();
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
   it('maps session store messages into chat session history in order', () => {
     const session: any = {
       id: 's1',
@@ -75,7 +143,7 @@ describe('FeishuChatSessionManager', () => {
   });
 
   it('returns empty history when session has no messages', () => {
-    const session = {
+    const session: any = {
       id: 's1',
       feishuKey: 'chat-1',
       label: 'Session 1',
@@ -101,8 +169,90 @@ describe('FeishuChatSessionManager', () => {
     expect(chatSession.history).toEqual([]);
   });
 
+  it('reuses existing shared feishu session when creating a new chat session item', async () => {
+    const sharedSession: any = {
+      id: 's-shared',
+      feishuKey: 'oc_shared',
+      label: '飞书 oc_shared',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 2,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      list: vi.fn(() => [sharedSession]),
+      getOrCreate: vi.fn(),
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, {} as any, {} as any);
+    (manager as any).makeItem = vi.fn((session: { label: string }) => ({ label: session.label }));
+
+    const item = await (manager as any).handleNewSession(
+      { request: { prompt: 'new chat' } },
+      {} as any,
+    );
+
+    expect(store.getOrCreate).not.toHaveBeenCalled();
+    expect(item.label).toBe('飞书 oc_shared');
+  });
+
+  it('returns empty history when legacy session misses messages field', () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      archived: false,
+    };
+
+    const manager = new FeishuChatSessionManager(
+      {
+        get: vi.fn(() => session),
+      } as any,
+      {} as any,
+      {} as any,
+    );
+
+    const provider = (manager as any).buildContentProvider();
+    const chatSession = provider.provideChatSessionContent({ path: '/s1' }, {} as any);
+
+    expect(chatSession.title).toBe('Session 1');
+    expect(chatSession.history).toEqual([]);
+  });
+
+  it('returns empty history when legacy session has non-array messages', () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: {},
+      archived: false,
+    };
+
+    const manager = new FeishuChatSessionManager(
+      {
+        get: vi.fn(() => session),
+      } as any,
+      {} as any,
+      {} as any,
+    );
+
+    const provider = (manager as any).buildContentProvider();
+    const chatSession = provider.provideChatSessionContent({ path: '/s1' }, {} as any);
+
+    expect(chatSession.title).toBe('Session 1');
+    expect(chatSession.history).toEqual([]);
+  });
+
   it('normalizes stale selected agent in chat session input state', async () => {
-    const session = {
+    const session: any = {
       id: 's1',
       feishuKey: 'chat-1',
       label: 'Session 1',
@@ -347,13 +497,123 @@ describe('FeishuChatSessionManager', () => {
     expect((session.messages[0] as { role: string }).role).toBe('user');
   });
 
-  it('does not emit error markdown for cancelled inline vscode request', async () => {
+  it('mirrors vscode turns back to feishu for existing feishu sessions', async () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      get: vi.fn(() => session),
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string }) => {
+        session.messages.push({ ...message, timestampMs: 2 });
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const generate = vi.fn(async function* () {
+      yield 'reply from vscode';
+    });
+
+    const registry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({
+        id: 'superpowers',
+        displayName: 'Superpowers',
+        description: 'default flow',
+        systemPrompt: 'Default system prompt',
+      }),
+      listRunnable: () => [],
+    } as any;
+
+    const mirrorTurn = vi.fn().mockResolvedValue(undefined);
+    const manager = new FeishuChatSessionManager(store, { generate } as any, registry);
+    manager.setMirror({ mirrorTurn });
+    const provider = (manager as any).buildContentProvider();
+    const chatSession = provider.provideChatSessionContent({ path: '/s1' }, {} as any);
+
+    await chatSession.requestHandler(
+      { prompt: 'sync this turn' },
+      { chatSessionContext: { inputState: { groups: [] } } },
+      { markdown: vi.fn() } as any,
+      { onCancellationRequested: vi.fn() },
+    );
+
+    expect(mirrorTurn).toHaveBeenCalledWith(
+      session,
+      expect.objectContaining({
+        userText: 'sync this turn',
+        assistantText: 'reply from vscode',
+      }),
+    );
+  });
+
+  it('does not mirror vscode turns for local-only sessions', async () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'vscode-123',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      get: vi.fn(() => session),
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string }) => {
+        session.messages.push({ ...message, timestampMs: 2 });
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const generate = vi.fn(async function* () {
+      yield 'reply from vscode';
+    });
+
+    const registry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({
+        id: 'superpowers',
+        displayName: 'Superpowers',
+        description: 'default flow',
+        systemPrompt: 'Default system prompt',
+      }),
+      listRunnable: () => [],
+    } as any;
+
+    const mirrorTurn = vi.fn().mockResolvedValue(undefined);
+    const manager = new FeishuChatSessionManager(store, { generate } as any, registry);
+    manager.setMirror({ mirrorTurn });
+    const provider = (manager as any).buildContentProvider();
+    const chatSession = provider.provideChatSessionContent({ path: '/s1' }, {} as any);
+
+    await chatSession.requestHandler(
+      { prompt: 'local only' },
+      { chatSessionContext: { inputState: { groups: [] } } },
+      { markdown: vi.fn() } as any,
+      { onCancellationRequested: vi.fn() },
+    );
+
+    expect(mirrorTurn).not.toHaveBeenCalled();
+  });
+
+  it('prompts user when request is not bound to a shared feishu session', async () => {
+    const generate = vi.fn(async function* (_message: InboundChatMessage, _signal?: AbortSignal) {
+      yield 'should not run';
+    });
+
     const manager = new FeishuChatSessionManager(
       {} as any,
       {
-        generate: vi.fn(async function* (_message: InboundChatMessage, _signal?: AbortSignal) {
-          throw new DOMException('The operation was aborted.', 'AbortError');
-        }),
+        generate,
       } as any,
       {} as any,
     );
@@ -367,14 +627,224 @@ describe('FeishuChatSessionManager', () => {
       {},
       stream,
       {
-        isCancellationRequested: true,
         onCancellationRequested: vi.fn((handler: () => void) => {
-          handler();
           return { dispose: () => {} };
         }),
       },
     );
 
-    expect(stream.markdown).not.toHaveBeenCalledWith(expect.stringContaining('⚠️ Error:'));
+    expect(stream.markdown).toHaveBeenCalledWith(
+      expect.stringContaining('not bound to a Feishu shared session'),
+    );
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('routes participant requests for feishu sessions into the shared session store', async () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      get: vi.fn(() => session),
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string }) => {
+        session.messages.push({ ...message, timestampMs: Date.now() });
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const generate = vi.fn(async function* () {
+      yield 'shared reply';
+    });
+
+    const registry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({
+        id: 'superpowers',
+        displayName: 'Superpowers',
+        description: 'default flow',
+        systemPrompt: 'Default system prompt',
+      }),
+      listRunnable: () => [],
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, { generate } as any, registry);
+
+    await (manager as any).handleVsCodeRequest(
+      { prompt: 'persist this turn' },
+      {
+        chatSessionContext: {
+          chatSessionItem: {
+            resource: { scheme: 'feishu-session', path: '/s1' },
+          },
+          inputState: { groups: [] },
+        },
+      },
+      { markdown: vi.fn() } as any,
+      { onCancellationRequested: vi.fn() },
+    );
+
+    expect(store.get).toHaveBeenCalledWith('s1');
+    expect(store.appendMessage).toHaveBeenCalledTimes(2);
+    expect(session.messages[0]).toMatchObject({ role: 'user', source: 'vscode', text: 'persist this turn' });
+    expect(session.messages[1]).toMatchObject({ role: 'assistant', source: 'vscode', text: 'shared reply' });
+  });
+
+  it('does not fall back to last opened feishu session when chat editor resource is not feishu-session', async () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      get: vi.fn((id: string) => (id === 's1' ? session : undefined)),
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string }) => {
+        session.messages.push({ ...message, timestampMs: Date.now() });
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const generate = vi.fn(async function* () {
+      yield 'shared reply';
+    });
+
+    const registry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({
+        id: 'superpowers',
+        displayName: 'Superpowers',
+        description: 'default flow',
+        systemPrompt: 'Default system prompt',
+      }),
+      listRunnable: () => [],
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, { generate } as any, registry);
+    (manager as any).lastOpenedSessionId = 's1';
+
+    const stream = { markdown: vi.fn() } as any;
+
+    await (manager as any).handleVsCodeRequest(
+      { prompt: 'persist via fallback' },
+      {
+        chatSessionContext: {
+          chatSessionItem: {
+            resource: { scheme: 'vscode-chat', path: '/editor-session' },
+          },
+          inputState: { groups: [{ id: 'agent', items: [], selected: undefined }] },
+        },
+      },
+      stream,
+      { onCancellationRequested: vi.fn() },
+    );
+
+    expect(store.appendMessage).not.toHaveBeenCalled();
+    expect(stream.markdown).toHaveBeenCalledWith(
+      expect.stringContaining('not bound to a Feishu shared session'),
+    );
+  });
+
+  it('does not fall back to the single shared feishu session when context cannot resolve resource', async () => {
+    const session: any = {
+      id: 's1',
+      feishuKey: 'oc_abc',
+      label: '飞书 oc_abc',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const store = {
+      get: vi.fn(() => undefined),
+      list: vi.fn(() => [session]),
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string }) => {
+        session.messages.push({ ...message, timestampMs: Date.now() });
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const generate = vi.fn(async function* () {
+      yield 'shared reply';
+    });
+
+    const registry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({
+        id: 'superpowers',
+        displayName: 'Superpowers',
+        description: 'default flow',
+        systemPrompt: 'Default system prompt',
+      }),
+      listRunnable: () => [],
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, { generate } as any, registry);
+
+    const stream = { markdown: vi.fn() } as any;
+
+    await (manager as any).handleVsCodeRequest(
+      { prompt: 'persist via single-session fallback' },
+      {
+        chatSessionContext: {
+          chatSessionItem: {
+            resource: { scheme: 'vscode-chat', path: '/editor-session' },
+            label: 'unrelated-editor-session',
+          },
+          inputState: { groups: [] },
+        },
+      },
+      stream,
+      { onCancellationRequested: vi.fn() },
+    );
+
+    expect(store.list).not.toHaveBeenCalled();
+    expect(store.appendMessage).not.toHaveBeenCalled();
+    expect(stream.markdown).toHaveBeenCalledWith(
+      expect.stringContaining('not bound to a Feishu shared session'),
+    );
+  });
+
+  it('opens the latest shared session explicitly', async () => {
+    const executeCommand = vi.mocked(vscode.commands.executeCommand);
+    executeCommand.mockClear();
+
+    const store = {
+      list: vi.fn(() => [
+        {
+          id: 's1',
+          feishuKey: 'chat-1',
+          label: 'Session 1',
+          selectedAgentId: 'superpowers',
+          createdAt: 1,
+          lastActiveAt: 2,
+          messages: [],
+          archived: false,
+        },
+      ]),
+    } as any;
+
+    const manager = new FeishuChatSessionManager(store, {} as any, {} as any);
+    const opened = await manager.openLatestSharedSession();
+
+    expect(opened).toBe(true);
+    expect(executeCommand).toHaveBeenCalledWith(
+      'vscode.open',
+      expect.objectContaining({ scheme: 'feishu-session', path: '/s1' }),
+      expect.objectContaining({ preview: false }),
+    );
   });
 });

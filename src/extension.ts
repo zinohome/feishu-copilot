@@ -3,11 +3,12 @@ import { Pipeline } from './app/pipeline';
 import type { FeishuWebhookEvent } from './app/pipeline';
 import type { BridgeConfig } from './config/types';
 import { VscodeLmAdapter } from './copilot/vscode-lm-adapter';
-import { getToken } from './feishu/feishu-client';
+import { getToken, sendText } from './feishu/feishu-client';
 import type { FeishuWsEventSourceHandle, FeishuWsEventSourceOptions } from './feishu/ws-event-source';
 import { SessionStore } from './session/session-store';
 import { FeishuChatSessionManager } from './session/feishu-chat-session-manager';
 import { AgentRegistry } from './agent/agent-registry';
+import { resolveSessionStorePath } from './session/store-path-resolver';
 
 type StartFeishuWsEventSourceFn = (options: FeishuWsEventSourceOptions) => FeishuWsEventSourceHandle;
 
@@ -62,6 +63,16 @@ function readSuperpowersSourcePath(): string {
   return cfg.get<string>('superpowersSourcePath', '').trim();
 }
 
+function readSharedStorePath(): string {
+  const cfg = vscode.workspace.getConfiguration('feishuCopilot');
+  return cfg.get<string>('sharedStorePath', '').trim();
+}
+
+function readAllowGlobalStorageFallback(): boolean {
+  const cfg = vscode.workspace.getConfiguration('feishuCopilot');
+  return cfg.get<boolean>('allowGlobalStorageFallback', true);
+}
+
 export function shouldRestartBridgeForConfigChange(
   evt: { affectsConfiguration: (section: string) => boolean },
   isBridgeRunning: boolean,
@@ -74,7 +85,9 @@ export function shouldRestartBridgeForConfigChange(
     evt.affectsConfiguration('feishuCopilot.superpowersSourcePath') ||
     evt.affectsConfiguration('feishuCopilot.ownerOpenId') ||
     evt.affectsConfiguration('feishuCopilot.feishuAppId') ||
-    evt.affectsConfiguration('feishuCopilot.feishuAppSecret')
+    evt.affectsConfiguration('feishuCopilot.feishuAppSecret') ||
+    evt.affectsConfiguration('feishuCopilot.sharedStorePath') ||
+    evt.affectsConfiguration('feishuCopilot.allowGlobalStorageFallback')
   );
 }
 
@@ -154,6 +167,8 @@ async function startBridge(showToast = true): Promise<void> {
     workspaceAllowlist: [],
     approvalTimeoutMs,
     cardPatchIntervalMs,
+    sharedStorePath: readSharedStorePath(),
+    allowGlobalStorageFallback: readAllowGlobalStorageFallback(),
   };
 
   const pipeline = new Pipeline({
@@ -163,6 +178,18 @@ async function startBridge(showToast = true): Promise<void> {
     sessionStore,
     sessionManager,
     agentRegistry,
+  });
+
+  sessionManager?.setMirror({
+    mirrorTurn: async (session, turn) => {
+      const mirroredText = [
+        'From VS Code',
+        `User: ${turn.userText}`,
+        '',
+        `Assistant: ${turn.assistantText}`,
+      ].join('\n');
+      await sendText(feishuToken, session.feishuKey, mirroredText);
+    },
   });
 
   let startFeishuWsEventSource: StartFeishuWsEventSourceFn;
@@ -202,6 +229,7 @@ async function startBridge(showToast = true): Promise<void> {
 function stopBridge(showToast = true): void {
   wsHandle?.close();
   wsHandle = undefined;
+  sessionManager?.setMirror(undefined);
   updateStatusBar();
   if (showToast) {
     void vscode.window.showInformationMessage('Feishu Copilot Bridge stopped');
@@ -224,6 +252,7 @@ async function showStatusMenu(): Promise<void> {
       [
         { label: 'Stop Bridge', description: 'Stop Feishu WebSocket bridge', action: 'stop' },
         { label: 'Restart Bridge', description: 'Restart bridge connection', action: 'restart' },
+        { label: 'Open Latest Shared Session', description: 'Continue from the latest Feishu shared session', action: 'openLatest' },
         { label: 'Open Settings', description: 'Set feishuCopilot Configs', action: 'settings' },
       ],
       {
@@ -242,6 +271,10 @@ async function showStatusMenu(): Promise<void> {
     }
     if (picked.action === 'restart') {
       await restartBridge();
+      return;
+    }
+    if (picked.action === 'openLatest') {
+      await vscode.commands.executeCommand('feishu-copilot.openLatestSharedSession');
       return;
     }
     await vscode.commands.executeCommand('feishu-copilot.openSettings');
@@ -294,7 +327,27 @@ async function showStatusMenu(): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   // Initialize session store and Copilot Chat session manager
-  sessionStore = new SessionStore(context);
+  let resolvedStore;
+  try {
+    resolvedStore = resolveSessionStorePath({
+      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map(f => ({ uri: { fsPath: f.uri.fsPath } })),
+      configuredSharedStorePath: readSharedStorePath(),
+      globalStoragePath: context.globalStorageUri.fsPath,
+      allowGlobalStorageFallback: readAllowGlobalStorageFallback(),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    void vscode.window.showErrorMessage(`Feishu Copilot: ${msg}`);
+    return;
+  }
+
+  sessionStore = new SessionStore(context, {
+    storePath: resolvedStore.storePath,
+    storeMode: resolvedStore.mode,
+  });
+  if (resolvedStore.warning) {
+    void vscode.window.showWarningMessage(`Feishu Copilot: ${resolvedStore.warning}`);
+  }
   rebuildAgentRuntime(context);
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -323,6 +376,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       '@ext:feishu-copilot.feishu-copilot-bridge feishuCopilot',
     );
   });
+
+  const openLatestSharedSessionCmd = vscode.commands.registerCommand(
+    'feishu-copilot.openLatestSharedSession',
+    async () => {
+      if (!sessionManager) {
+        void vscode.window.showWarningMessage('Feishu Copilot session manager is not ready yet.');
+        return;
+      }
+      const opened = await sessionManager.openLatestSharedSession();
+      if (!opened) {
+        void vscode.window.showInformationMessage(
+          'No shared Feishu session found yet. Start a conversation from Feishu first.',
+        );
+      }
+    },
+  );
 
   const configWatcher = vscode.workspace.onDidChangeConfiguration((evt) => {
     if (evt.affectsConfiguration('feishuCopilot')) {
@@ -359,6 +428,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     restartCmd,
     statusCmd,
     settingsCmd,
+    openLatestSharedSessionCmd,
     configWatcher,
     statusBarItem,
     serverDisposable

@@ -10,7 +10,8 @@ export class SuperpowersLoader implements SuperpowersSkillLoader {
   private readonly rootPath: string;
 
   constructor(sourcePath?: string) {
-    this.rootPath = sourcePath?.trim() || this.autoDetectRootPath() || '';
+    const normalized = this.normalizeSourcePath(sourcePath);
+    this.rootPath = normalized || this.autoDetectRootPath() || '';
   }
 
   loadSkillPrompt(skillFolder: string): string | undefined {
@@ -18,20 +19,49 @@ export class SuperpowersLoader implements SuperpowersSkillLoader {
       return undefined;
     }
 
-    const filePath = path.join(this.rootPath, 'skills', skillFolder, 'SKILL.md');
-    try {
-      if (!fs.existsSync(filePath)) {
-        return undefined;
-      }
-      const text = fs.readFileSync(filePath, 'utf8').trim();
-      return text || undefined;
-    } catch {
-      return undefined;
+    const aliases = this.resolveAliases(skillFolder);
+    const candidates: string[] = [];
+    for (const name of aliases) {
+      candidates.push(path.join(this.rootPath, 'skills', name, 'SKILL.md'));
+      candidates.push(path.join(this.rootPath, 'agents', `${name}.agent.md`));
+      candidates.push(path.join(this.rootPath, `${name}.agent.md`));
     }
+
+    for (const filePath of candidates) {
+      try {
+        if (!fs.existsSync(filePath)) {
+          continue;
+        }
+        const text = fs.readFileSync(filePath, 'utf8').trim();
+        if (text) {
+          return text;
+        }
+      } catch {
+        // continue probing other candidate paths
+      }
+    }
+
+    return undefined;
   }
 
   private autoDetectRootPath(): string | undefined {
-    const extRoot = path.join(os.homedir(), '.vscode', 'extensions');
+    const home = os.homedir();
+    const preferredRoots = [
+      path.join(home, '.superpowers-copilot'),
+      path.join(home, '.superpowers-copilot', 'agents'),
+    ];
+
+    for (const p of preferredRoots) {
+      try {
+        if (fs.existsSync(p)) {
+          return p;
+        }
+      } catch {
+        // keep probing
+      }
+    }
+
+    const extRoot = path.join(home, '.vscode', 'extensions');
     try {
       const entries = fs.readdirSync(extRoot, { withFileTypes: true });
       const matches = entries
@@ -43,5 +73,29 @@ export class SuperpowersLoader implements SuperpowersSkillLoader {
     } catch {
       return undefined;
     }
+  }
+
+  private normalizeSourcePath(sourcePath?: string): string | undefined {
+    const raw = sourcePath?.trim();
+    if (!raw) {
+      return undefined;
+    }
+
+    const home = os.homedir();
+    if (raw === '~') {
+      return home;
+    }
+    if (raw.startsWith('~/')) {
+      return path.join(home, raw.slice(2));
+    }
+    return raw;
+  }
+
+  private resolveAliases(skillFolder: string): string[] {
+    const aliases = [skillFolder];
+    if (skillFolder === 'writing-skills') {
+      aliases.push('writing-agents');
+    }
+    return aliases;
   }
 }

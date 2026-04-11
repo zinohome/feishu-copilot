@@ -1,6 +1,6 @@
 {
   "name": "feishu-copilot-bridge",
-  "version": "0.0.7",
+  "version": "0.0.27",
   "private": true,
   "publisher": "feishu-copilot",
   "displayName": "Feishu Copilot Bridge",
@@ -19,8 +19,10 @@
         "name": "feishu",
         "fullName": "Feishu Copilot",
         "description": "Chat with Copilot, synced with Feishu",
-        "isDefault": false,
-        "locations": ["panel"]
+        "isDefault": true,
+        "locations": [
+          "panel"
+        ]
       }
     ],
     "chatSessions": [
@@ -49,6 +51,10 @@
       {
         "command": "feishu-copilot.openSettings",
         "title": "Feishu Copilot: Open Settings"
+      },
+      {
+        "command": "feishu-copilot.openLatestSharedSession",
+        "title": "Feishu Copilot: Open Latest Shared Session"
       }
     ],
     "configuration": {
@@ -73,6 +79,16 @@
           "type": "string",
           "default": "",
           "description": "Absolute path of Superpowers extension root. If empty, auto-detect from ~/.vscode/extensions."
+        },
+        "feishuCopilot.sharedStorePath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to shared sessions.json. Used when no workspace folder is available."
+        },
+        "feishuCopilot.allowGlobalStorageFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow fallback to editor-local globalStorage when shared path is unavailable."
         }
       }
     }

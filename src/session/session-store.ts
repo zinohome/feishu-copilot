@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SUPERPOWERS_DEFAULT_AGENT_ID } from '../agent/superpowers-agent-presets';
+import type { SessionStoreMode } from './store-path-resolver';
 
 export interface SessionMessage {
   role: 'user' | 'assistant';
@@ -23,16 +24,46 @@ export interface FeishuSession {
   archived: boolean;
 }
 
+export interface SessionStoreChangeEvent {
+  sessionId: string;
+  reason: 'create' | 'append' | 'rename' | 'archive' | 'setSelectedAgent';
+  messageSource?: SessionMessage['source'];
+}
+
+export interface SessionStoreOptions {
+  storePath?: string;
+  storeMode?: SessionStoreMode;
+}
+
 export class SessionStore {
   private readonly sessions = new Map<string, FeishuSession>();
   private readonly storePath: string;
+  private readonly storeMode: SessionStoreMode;
 
-  private readonly _onDidChange = new vscode.EventEmitter<void>();
+  private readonly _onDidChange = new vscode.EventEmitter<SessionStoreChangeEvent>();
   readonly onDidChange = this._onDidChange.event;
 
-  constructor(context: vscode.ExtensionContext) {
-    this.storePath = path.join(context.globalStorageUri.fsPath, 'sessions.json');
+  constructor(context: vscode.ExtensionContext, options?: SessionStoreOptions) {
+    this.storePath = options?.storePath ?? path.join(context.globalStorageUri.fsPath, 'sessions.json');
+    this.storeMode = options?.storeMode ?? 'editor-local-fallback';
     this.load();
+  }
+
+  getStorageInfo(): { storePath: string; storeMode: SessionStoreMode } {
+    return {
+      storePath: this.storePath,
+      storeMode: this.storeMode,
+    };
+  }
+
+  private normalizeSession(session: FeishuSession): FeishuSession {
+    if (!Array.isArray((session as { messages?: unknown }).messages)) {
+      session.messages = [];
+    }
+    if (!session.selectedAgentId) {
+      session.selectedAgentId = SUPERPOWERS_DEFAULT_AGENT_ID;
+    }
+    return session;
   }
 
   private load(): void {
@@ -41,10 +72,7 @@ export class SessionStore {
         const raw = fs.readFileSync(this.storePath, 'utf8');
         const data = JSON.parse(raw) as FeishuSession[];
         for (const s of data) {
-          if (!s.selectedAgentId) {
-            s.selectedAgentId = SUPERPOWERS_DEFAULT_AGENT_ID;
-          }
-          this.sessions.set(s.id, s);
+          this.sessions.set(s.id, this.normalizeSession(s));
         }
       }
     } catch {
@@ -67,17 +95,21 @@ export class SessionStore {
   /** Return all non-archived sessions sorted newest first */
   list(): FeishuSession[] {
     return [...this.sessions.values()]
+      .map(s => this.normalizeSession(s))
       .filter(s => !s.archived)
       .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
   /** Return all sessions including archived */
   listAll(): FeishuSession[] {
-    return [...this.sessions.values()].sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+    return [...this.sessions.values()]
+      .map(s => this.normalizeSession(s))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
   get(id: string): FeishuSession | undefined {
-    return this.sessions.get(id);
+    const s = this.sessions.get(id);
+    return s ? this.normalizeSession(s) : undefined;
   }
 
   /** Find or create a session by feishu key (chat_id / open_id) */
@@ -100,7 +132,7 @@ export class SessionStore {
     };
     this.sessions.set(id, session);
     this.persist();
-    this._onDidChange.fire();
+    this._onDidChange.fire({ sessionId: id, reason: 'create' });
     return session;
   }
 
@@ -112,7 +144,7 @@ export class SessionStore {
     s.messages.push(msg);
     s.lastActiveAt = msg.timestampMs;
     this.persist();
-    this._onDidChange.fire();
+    this._onDidChange.fire({ sessionId, reason: 'append', messageSource: msg.source });
   }
 
   rename(sessionId: string, label: string): void {
@@ -122,7 +154,7 @@ export class SessionStore {
     }
     s.label = label;
     this.persist();
-    this._onDidChange.fire();
+    this._onDidChange.fire({ sessionId, reason: 'rename' });
   }
 
   archive(sessionId: string): void {
@@ -132,7 +164,7 @@ export class SessionStore {
     }
     s.archived = true;
     this.persist();
-    this._onDidChange.fire();
+    this._onDidChange.fire({ sessionId, reason: 'archive' });
   }
 
   setSelectedAgent(sessionId: string, agentId: string): void {
@@ -143,7 +175,7 @@ export class SessionStore {
     s.selectedAgentId = agentId;
     s.lastActiveAt = Date.now();
     this.persist();
-    this._onDidChange.fire();
+    this._onDidChange.fire({ sessionId, reason: 'setSelectedAgent' });
   }
 
   dispose(): void {

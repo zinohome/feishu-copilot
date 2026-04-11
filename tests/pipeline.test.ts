@@ -17,6 +17,8 @@ const config: BridgeConfig = {
   workspaceAllowlist: [],
   approvalTimeoutMs: 5000,
   cardPatchIntervalMs: 0,
+  sharedStorePath: '',
+  allowGlobalStorageFallback: true,
 };
 
 function makeEvent(openId: string, text = 'hello', chatId = 'chat-1', messageId = 'msg-1'): FeishuWebhookEvent {
@@ -392,6 +394,98 @@ describe('Pipeline', () => {
 
     expect(fakeSessionStore.setSelectedAgent).toHaveBeenCalledWith('s1', 'superpowers');
     expect(copilot.generate).toHaveBeenCalledOnce();
+  });
+
+  it('includes shared session history when feishu continues an existing session', async () => {
+    const copilot: CopilotAdapter = {
+      generate: vi.fn(async function* (_message, _signal) {
+        yield 'ok';
+      }),
+    };
+
+    const fakeSession: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 2,
+      messages: [
+        { role: 'user', text: 'from feishu before', timestampMs: 1, source: 'feishu' },
+        { role: 'assistant', text: 'from vscode before', timestampMs: 2, source: 'vscode' },
+      ],
+      archived: false,
+    };
+
+    const fakeSessionStore = {
+      getOrCreate: () => fakeSession,
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string; timestampMs: number }) => {
+        fakeSession.messages.push(message);
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const fakeRegistry = {
+      getDefaultAgentId: () => 'superpowers',
+      getRunnableById: () => ({ id: 'superpowers', systemPrompt: 'prompt' }),
+      getById: () => ({ id: 'superpowers', displayName: 'Superpowers' }),
+      formatForFeishu: () => 'Available agents:\n- superpowers',
+    } as any;
+
+    const pipeline = new Pipeline({
+      config,
+      copilot,
+      feishuToken: 'token-x',
+      sessionStore: fakeSessionStore,
+      agentRegistry: fakeRegistry,
+    });
+
+    await pipeline.handleInbound(makeEvent('ou_owner123', 'current feishu turn'));
+
+    const inbound = vi.mocked(copilot.generate).mock.calls[0][0];
+    expect(inbound.text).toContain('[Feishu user]: from feishu before');
+    expect(inbound.text).toContain('[VS Code assistant]: from vscode before');
+    expect(inbound.text).toContain('[user]: current feishu turn');
+    expect(inbound.text.match(/current feishu turn/g)).toHaveLength(1);
+  });
+
+  it('keeps feishu prompt minimal when the session has no prior history', async () => {
+    const copilot: CopilotAdapter = {
+      generate: vi.fn(async function* (_message, _signal) {
+        yield 'ok';
+      }),
+    };
+
+    const fakeSession: any = {
+      id: 's1',
+      feishuKey: 'chat-1',
+      label: 'Session 1',
+      selectedAgentId: 'superpowers',
+      createdAt: 1,
+      lastActiveAt: 1,
+      messages: [],
+      archived: false,
+    };
+
+    const fakeSessionStore = {
+      getOrCreate: () => fakeSession,
+      appendMessage: vi.fn((sessionId: string, message: { role: string; text: string; source: string; timestampMs: number }) => {
+        fakeSession.messages.push(message);
+      }),
+      setSelectedAgent: vi.fn(),
+    } as any;
+
+    const pipeline = new Pipeline({
+      config,
+      copilot,
+      feishuToken: 'token-x',
+      sessionStore: fakeSessionStore,
+    });
+
+    await pipeline.handleInbound(makeEvent('ou_owner123', 'first turn'));
+
+    const inbound = vi.mocked(copilot.generate).mock.calls[0][0];
+    expect(inbound.text).toBe('first turn');
   });
 
   it('passes AbortSignal to copilot generate', async () => {

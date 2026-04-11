@@ -29,6 +29,16 @@ describe('shouldRestartBridgeForConfigChange', () => {
     expect(shouldRestartBridgeForConfigChange(evt, true)).toBe(true);
   });
 
+  it('returns true for sharedStorePath change when bridge is running', () => {
+    const evt = eventFor('feishuCopilot.sharedStorePath');
+    expect(shouldRestartBridgeForConfigChange(evt, true)).toBe(true);
+  });
+
+  it('returns true for allowGlobalStorageFallback change when bridge is running', () => {
+    const evt = eventFor('feishuCopilot.allowGlobalStorageFallback');
+    expect(shouldRestartBridgeForConfigChange(evt, true)).toBe(true);
+  });
+
   it('returns false for credential changes when bridge is not running', () => {
     const appIdEvt = eventFor('feishuCopilot.feishuAppId');
     const appSecretEvt = eventFor('feishuCopilot.feishuAppSecret');
