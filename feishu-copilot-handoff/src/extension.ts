@@ -24,6 +24,30 @@ let activeController: BridgeController | undefined;
 let learnedTargetChatId: string | undefined;
 let sessionRefreshTimer: NodeJS.Timeout | undefined;
 
+async function ensureCopilotDebugLogEnabled(): Promise<void> {
+  const copilotConfig = vscode.workspace.getConfiguration('github.copilot.chat');
+  const enabled = copilotConfig.get<boolean>('agentDebugLog.fileLogging.enabled', false);
+  const flushInterval = copilotConfig.get<number>('agentDebugLog.fileLogging.flushIntervalMs', 1000);
+
+  if (!enabled) {
+    await copilotConfig.update(
+      'agentDebugLog.fileLogging.enabled',
+      true,
+      vscode.ConfigurationTarget.Global,
+    );
+    console.log('[feishu-copilot-handoff] enabled github.copilot.chat.agentDebugLog.fileLogging.enabled');
+  }
+
+  if (flushInterval > 500) {
+    await copilotConfig.update(
+      'agentDebugLog.fileLogging.flushIntervalMs',
+      500,
+      vscode.ConfigurationTarget.Global,
+    );
+    console.log('[feishu-copilot-handoff] set github.copilot.chat.agentDebugLog.fileLogging.flushIntervalMs to 500');
+  }
+}
+
 function readLiveConfig(): ReturnType<typeof readExtensionConfig> {
   return readExtensionConfig(vscode.workspace.getConfiguration('feishuCopilotHandoff'));
 }
@@ -124,7 +148,8 @@ export async function activate(
     }
     try {
       const files = await listChatSessionFiles(storagePath);
-      console.log('[feishu-copilot-handoff] refreshSessions found', files.length, 'session files at', storagePath);
+      const now = new Date().toISOString().slice(11, 19);
+      console.log(`[feishu-copilot-handoff] ${now} refreshSessions: found ${files.length} files`, storagePath);
       if (files.length === 0) {
         console.debug('[feishu-copilot-handoff] refreshSessions: no chat session files found at', storagePath);
         // List directory contents for debugging
@@ -137,17 +162,24 @@ export async function activate(
         return;
       }
       for (const filePath of files) {
-        const stat = await fs.stat(filePath);
-        const content = await fs.readFile(filePath, 'utf8');
-        const fileName = path.basename(filePath);
-        console.log('[feishu-copilot-handoff] processing session file:', fileName, 'size:', content.length, 'lines:', content.split('\n').length - 1);
-        
-        // Choose parser based on file extension
-        const summary = fileName.endsWith('.json')
-          ? parseChatSessionJson(fileName, content, stat.mtimeMs)
-          : parseChatSessionJsonl(fileName, content, stat.mtimeMs);
-        
-        await controller.handleSessionUpdate(summary);
+        try {
+          const stat = await fs.stat(filePath);
+          const content = await fs.readFile(filePath, 'utf8');
+          const fileName = path.basename(filePath);
+          const lines = content.split('\n').length - 1;
+          console.log('[feishu-copilot-handoff]   file:', fileName, `(${content.length}B, ${lines} lines, mtime: ${new Date(stat.mtimeMs).toISOString()})`);
+
+          // Choose parser based on file extension
+          const summary = fileName.endsWith('.json')
+            ? parseChatSessionJson(fileName, content, stat.mtimeMs)
+            : parseChatSessionJsonl(fileName, content, stat.mtimeMs);
+
+          console.log('[feishu-copilot-handoff]   parsed:', `${summary.turns.length} turns, title: ${summary.title.slice(0, 30)}...`);
+          await controller.handleSessionUpdate(summary);
+        } catch (fileErr) {
+          const fileErrMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+          console.warn('[feishu-copilot-handoff]   ERROR:', filePath, fileErrMsg);
+        }
       }
     } catch (err) {
       // storage path may not exist yet, or chatSessions dir doesn't exist
@@ -185,6 +217,13 @@ export async function activate(
       }
       updateStatusBar();
       return;
+    }
+
+    try {
+      await ensureCopilotDebugLogEnabled();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[feishu-copilot-handoff] failed to enable copilot debug log settings:', errMsg);
     }
 
     const config = readLiveConfig();
@@ -227,35 +266,39 @@ export async function activate(
       appId: config.feishuAppId,
       appSecret: config.feishuAppSecret,
       onMessage: async (message) => {
-        if (message.senderOpenId !== config.ownerOpenId || !activeController) {
-          return;
-        }
+        try {
+          if (message.senderOpenId !== config.ownerOpenId || !activeController) {
+            return;
+          }
 
-        // Track the chat ID from the most recent inbound message.
-        // This allows users to switch target chats in Feishu dynamically.
-        const previousTargetChatId = runtimeTargetChatId;
-        if (!runtimeTargetChatId) {
-          runtimeTargetChatId = message.chatId;
-          learnedTargetChatId = runtimeTargetChatId;
-          activeController.setTargetChatId(runtimeTargetChatId);
-          await refreshSessions(activeController);
-          void vscode.window.showInformationMessage(`Feishu Copilot Handoff learned target chat: ${runtimeTargetChatId}`);
-          updateStatusBar();
-        } else if (message.chatId !== runtimeTargetChatId) {
-          // User switched to a different Feishu chat. Update target and sync current session.
-          runtimeTargetChatId = message.chatId;
-          learnedTargetChatId = runtimeTargetChatId;
-          activeController.setTargetChatId(runtimeTargetChatId);
-          await refreshSessions(activeController);
-          void vscode.window.showInformationMessage(`Feishu Copilot Handoff switched to new chat: ${runtimeTargetChatId}`);
-          updateStatusBar();
-        }
+          // Track the chat ID from the most recent inbound message.
+          // This allows users to switch target chats in Feishu dynamically.
+          if (!runtimeTargetChatId) {
+            runtimeTargetChatId = message.chatId;
+            learnedTargetChatId = runtimeTargetChatId;
+            activeController.setTargetChatId(runtimeTargetChatId);
+            await refreshSessions(activeController);
+            void vscode.window.showInformationMessage(`Feishu Copilot Handoff learned target chat: ${runtimeTargetChatId}`);
+            updateStatusBar();
+          } else if (message.chatId !== runtimeTargetChatId) {
+            // User switched to a different Feishu chat. Update target and sync current session.
+            runtimeTargetChatId = message.chatId;
+            learnedTargetChatId = runtimeTargetChatId;
+            activeController.setTargetChatId(runtimeTargetChatId);
+            await refreshSessions(activeController);
+            void vscode.window.showInformationMessage(`Feishu Copilot Handoff switched to new chat: ${runtimeTargetChatId}`);
+            updateStatusBar();
+          }
 
-        const reply = await activeController.handleFeishuText(message.text, (text) =>
-          commandService.submitToChat(text),
-        );
-        if (reply) {
-          await sendFeishuText(await freshToken(config), runtimeTargetChatId || message.chatId, reply);
+          const reply = await activeController.handleFeishuText(message.text, (text) =>
+            commandService.submitToChat(text),
+          );
+          if (reply) {
+            await sendFeishuText(await freshToken(config), runtimeTargetChatId || message.chatId, reply);
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error('[feishu-copilot-handoff] onMessage failed:', errMsg);
         }
       },
     });
@@ -364,6 +407,15 @@ export async function activate(
   );
 
   updateStatusBar();
+
+  // Auto-start on activation when required credentials are present.
+  if (isConfigured(readLiveConfig())) {
+    void startBridge(false).catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error('[feishu-copilot-handoff] auto-start failed:', errMsg);
+      updateStatusBar();
+    });
+  }
 }
 
 // Fix #4: close the WebSocket connection when the extension is deactivated

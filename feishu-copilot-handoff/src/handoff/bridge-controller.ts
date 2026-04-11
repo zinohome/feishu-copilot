@@ -1,6 +1,20 @@
 import { ActiveSessionTracker } from '../copilot/active-session-tracker';
 import type { SessionSummary } from '../types';
-import { renderMirroredTurn, renderSessionSwitch } from './feishu-renderer';
+import { renderAssistantMessage, renderSessionSwitch, renderUserMessage } from './feishu-renderer';
+
+type OutboundEventType = 'session-switch' | 'user-message' | 'assistant-message';
+type OutboundRole = 'system' | 'user' | 'assistant';
+
+interface OutboundEvent {
+  id: string;
+  sessionId: string;
+  reqKey?: string;
+  type: OutboundEventType;
+  role: OutboundRole;
+  payload: string;
+}
+
+const BOOTSTRAP_TAIL_WINDOW = 12;
 
 export interface BridgeControllerOptions {
   ownerOpenId: string;
@@ -11,7 +25,12 @@ export interface BridgeControllerOptions {
 
 export class BridgeController {
   private readonly tracker = new ActiveSessionTracker();
-  private lastMirroredSignatureBySession = new Map<string, string>();
+  private sentUserReqKeys = new Set<string>();
+  private lastSentAssistantByReqKey = new Map<string, string>();
+  private processedTurnCountBySession = new Map<string, number>();
+  private outboundQueue: OutboundEvent[] = [];
+  private queuedEventIds = new Set<string>();
+  private queueDraining = false;
   private lastTargetSessionId: string | undefined;
   private targetChatId: string | undefined;
 
@@ -24,41 +43,149 @@ export class BridgeController {
     this.targetChatId = trimmed || undefined;
   }
 
+  private enqueueEvent(event: OutboundEvent): void {
+    if (this.queuedEventIds.has(event.id)) {
+      return;
+    }
+
+    // Keep only the latest unsent assistant event for the same request.
+    if (event.type === 'assistant-message' && event.reqKey) {
+      const staleIds: string[] = [];
+      this.outboundQueue = this.outboundQueue.filter((queued) => {
+        const keep = !(queued.type === 'assistant-message' && queued.reqKey === event.reqKey);
+        if (!keep) {
+          staleIds.push(queued.id);
+        }
+        return keep;
+      });
+      for (const staleId of staleIds) {
+        this.queuedEventIds.delete(staleId);
+      }
+    }
+
+    this.outboundQueue.push(event);
+    this.queuedEventIds.add(event.id);
+  }
+
+  private async drainQueue(): Promise<void> {
+    if (this.queueDraining || !this.targetChatId) {
+      return;
+    }
+
+    this.queueDraining = true;
+    try {
+      while (this.outboundQueue.length > 0) {
+        const event = this.outboundQueue[0];
+
+        try {
+          await this.options.sendFeishuText(this.targetChatId, event.payload);
+
+          // Ack event only after successful send.
+          if (event.type === 'user-message' && event.reqKey) {
+            this.sentUserReqKeys.add(event.reqKey);
+          }
+          if (event.type === 'assistant-message' && event.reqKey) {
+            this.lastSentAssistantByReqKey.set(event.reqKey, event.payload);
+          }
+
+          this.outboundQueue.shift();
+          this.queuedEventIds.delete(event.id);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn('[bridge-controller] outbound send failed, will retry:', event.type, errMsg);
+          break;
+        }
+      }
+    } finally {
+      this.queueDraining = false;
+    }
+  }
+
   async handleSessionUpdate(summary: SessionSummary): Promise<void> {
     this.tracker.upsert(summary);
     const currentTarget = this.tracker.getCurrentTarget();
-    if (!currentTarget || currentTarget.sessionId !== summary.sessionId || !this.targetChatId) {
+    const skipReason = !currentTarget
+      ? 'no current target'
+      : currentTarget.sessionId !== summary.sessionId
+      ? `session mismatch: ${currentTarget.sessionId} !== ${summary.sessionId}`
+      : !this.targetChatId
+      ? 'targetChatId not set'
+      : undefined;
+    
+    if (skipReason) {
+      console.log('[bridge-controller] handleSessionUpdate skipped:', skipReason);
       return;
     }
 
+    // After skipReason check, currentTarget is definitely defined
+    const target = currentTarget!;
+    
     console.log('[bridge-controller] handleSessionUpdate:', {
-      sessionId: currentTarget.sessionId,
-      title: currentTarget.title,
-      turns: currentTarget.turns.length,
+      sessionId: target.sessionId,
+      title: target.title,
+      turns: target.turns.length,
       targetChatId: this.targetChatId,
     });
 
-    if (this.lastTargetSessionId !== currentTarget.sessionId) {
-      this.lastTargetSessionId = currentTarget.sessionId;
+    if (this.lastTargetSessionId !== target.sessionId) {
+      this.lastTargetSessionId = target.sessionId;
       console.log('[bridge-controller] session switched, sending switch message');
-      await this.options.sendFeishuText(this.targetChatId, renderSessionSwitch(currentTarget));
+      this.enqueueEvent({
+        id: `switch:${target.sessionId}`,
+        sessionId: target.sessionId,
+        type: 'session-switch',
+        role: 'system',
+        payload: renderSessionSwitch(target),
+      });
     }
 
-    const lastTurn = currentTarget.turns.at(-1);
-    if (!lastTurn) {
+    if (target.turns.length === 0) {
       return;
     }
 
-    const signature = `${lastTurn.requestId}:${lastTurn.userText}:${lastTurn.assistantText}`;
-    const lastMirrored = this.lastMirroredSignatureBySession.get(currentTarget.sessionId);
-    if (lastMirrored === signature) {
-      console.log('[bridge-controller] message already mirrored, skipping');
-      return;
+    let processedCount = this.processedTurnCountBySession.get(target.sessionId);
+    if (processedCount === undefined) {
+      // On fresh start/reconnect, replay a recent tail window so delayed assistant
+      // replies on earlier turns are not missed.
+      processedCount = Math.max(0, target.turns.length - BOOTSTRAP_TAIL_WINDOW);
+    }
+    const startIndex = Math.max(0, processedCount - 1);
+    const pendingTurns = target.turns.slice(startIndex);
+
+    for (const turn of pendingTurns) {
+      const reqKey = `${target.sessionId}:${turn.requestId}`;
+
+      // Send user message when a new request arrives
+      if (!this.sentUserReqKeys.has(reqKey) && turn.userText) {
+        console.log('[bridge-controller] sending user message for requestId:', turn.requestId);
+        this.enqueueEvent({
+          id: `user:${reqKey}`,
+          sessionId: target.sessionId,
+          reqKey,
+          type: 'user-message',
+          role: 'user',
+          payload: renderUserMessage(turn),
+        });
+      }
+
+      // Send assistant reply when content arrives or changes
+      const lastAssistantText = this.lastSentAssistantByReqKey.get(reqKey) ?? '';
+      if (turn.assistantText && turn.assistantText !== lastAssistantText) {
+        const assistantSig = `${turn.requestId}:${turn.assistantText}`;
+        console.log('[bridge-controller] sending assistant reply, sig:', assistantSig.slice(0, 60));
+        this.enqueueEvent({
+          id: `assistant:${reqKey}:${turn.assistantText}`,
+          sessionId: target.sessionId,
+          reqKey,
+          type: 'assistant-message',
+          role: 'assistant',
+          payload: renderAssistantMessage(turn),
+        });
+      }
     }
 
-    console.log('[bridge-controller] mirroring new message:', { signature });
-    this.lastMirroredSignatureBySession.set(currentTarget.sessionId, signature);
-    await this.options.sendFeishuText(this.targetChatId, renderMirroredTurn(currentTarget));
+    this.processedTurnCountBySession.set(target.sessionId, target.turns.length);
+    await this.drainQueue();
   }
 
   listRecentSessions(limit = this.options.maxMirroredSessions ?? 8): SessionSummary[] {

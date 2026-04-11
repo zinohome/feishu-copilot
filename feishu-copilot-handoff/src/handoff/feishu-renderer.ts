@@ -1,26 +1,16 @@
-import type { SessionSummary } from '../types';
+import type { CopilotTurn, SessionSummary } from '../types';
 
+/** 仅在会话首次接入或切换时发送 */
 export function renderSessionSwitch(summary: SessionSummary): string {
-  return [
-    '已切换接力目标',
-    `Session: ${summary.title}`,
-    '状态: 后续飞书输入将直接提交到该会话',
-  ].join('\n');
+  return `🔗 **当前会话**\n${summary.title}`;
 }
 
-export function renderMirroredTurn(summary: SessionSummary): string {
-  const turn = summary.turns.at(-1);
-  if (!turn) {
-    return `当前接力会话: ${summary.title}`;
-  }
+/** 用户消息：直接发原文，不加前缀 */
+export function renderUserMessage(turn: CopilotTurn): string {
+  return turn.userText;
+}
 
-  return [
-    `[当前接力会话] ${summary.title}`,
-    '',
-    '你:',
-    turn.userText,
-    '',
-    'Copilot:',
-    turn.assistantText,
-  ].join('\n');
+/** Copilot 回复：直接发 Markdown 原文，不加前缀 */
+export function renderAssistantMessage(turn: CopilotTurn): string {
+  return turn.assistantText;
 }

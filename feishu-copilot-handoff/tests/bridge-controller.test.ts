@@ -81,9 +81,131 @@ describe('BridgeController mirror flow', () => {
       turns: [{ requestId: 'r1', userText: 'hello', assistantText: 'world', timestamp: 100 }],
     });
 
-    // 1st update sends switch + mirrored turn; 2nd update sends mirrored turn again
-    expect(sendText).toHaveBeenCalledTimes(3);
-    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('world'));
+    // 1st update: switch + user msg + assistant('wo') = 3 calls
+    // 2nd update: assistant updated to 'world' = 1 more call
+    expect(sendText).toHaveBeenCalledTimes(4);
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+  });
+
+  it('retries assistant send on next update when a previous assistant send failed', async () => {
+    const sendText = vi
+      .fn()
+      .mockResolvedValueOnce('msg_switch')
+      .mockResolvedValueOnce('msg_user')
+      .mockRejectedValueOnce(new Error('temporary assistant send failure'))
+      .mockResolvedValueOnce('msg_assistant_retry');
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: sendText,
+    });
+
+    const summary = {
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 100,
+      lastAssistantMessageAt: 100,
+      lastFileWriteAt: 100,
+      turns: [{ requestId: 'r1', userText: 'hello', assistantText: 'world', timestamp: 100 }],
+    };
+
+    await controller.handleSessionUpdate(summary);
+    await controller.handleSessionUpdate(summary);
+
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+  });
+
+  it('keeps raw assistant content and retries on next update when send fails', async () => {
+    const sendText = vi
+      .fn()
+      .mockResolvedValueOnce('msg_switch')
+      .mockResolvedValueOnce('msg_user')
+      .mockRejectedValueOnce(new Error('assistant markdown send failed'))
+      .mockResolvedValueOnce('msg_assistant_retry');
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: sendText,
+    });
+
+    const summary = {
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 100,
+      lastAssistantMessageAt: 100,
+      lastFileWriteAt: 100,
+      turns: [{ requestId: 'r1', userText: 'hello', assistantText: '**ok** `done`', timestamp: 100 }],
+    };
+
+    await controller.handleSessionUpdate(summary);
+    await controller.handleSessionUpdate(summary);
+
+    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('**ok** `done`'));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('**ok** `done`'));
+  });
+
+  it('retries user send on next update when a previous user send failed', async () => {
+    const sendText = vi
+      .fn()
+      .mockResolvedValueOnce('msg_switch')
+      .mockRejectedValueOnce(new Error('temporary user send failure'))
+      .mockResolvedValueOnce('msg_user_retry')
+      .mockResolvedValueOnce('msg_assistant');
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: sendText,
+    });
+
+    const summary = {
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 100,
+      lastAssistantMessageAt: 100,
+      lastFileWriteAt: 100,
+      turns: [{ requestId: 'r1', userText: 'hello', assistantText: 'world', timestamp: 100 }],
+    };
+
+    await controller.handleSessionUpdate(summary);
+    await controller.handleSessionUpdate(summary);
+
+    expect(sendText).toHaveBeenNthCalledWith(3, 'oc_target', expect.stringContaining('hello'));
+    expect(sendText).toHaveBeenNthCalledWith(4, 'oc_target', expect.stringContaining('world'));
+  });
+
+  it('still sends delayed assistant reply when a newer user turn already exists', async () => {
+    const sendText = vi.fn().mockResolvedValue('msg_1');
+    const controller = new BridgeController({
+      ownerOpenId: 'ou_owner',
+      targetChatId: 'oc_target',
+      sendFeishuText: sendText,
+    });
+
+    await controller.handleSessionUpdate({
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 100,
+      lastAssistantMessageAt: 0,
+      lastFileWriteAt: 100,
+      turns: [{ requestId: 'r1', userText: 'Q1', assistantText: '', timestamp: 100 }],
+    });
+
+    await controller.handleSessionUpdate({
+      sessionId: 'session-1',
+      title: 'React 重构',
+      lastUserMessageAt: 101,
+      lastAssistantMessageAt: 101,
+      lastFileWriteAt: 101,
+      turns: [
+        { requestId: 'r1', userText: 'Q1', assistantText: 'A1', timestamp: 100 },
+        { requestId: 'r2', userText: 'Q2', assistantText: '', timestamp: 101 },
+      ],
+    });
+
+    const sentPayloads = sendText.mock.calls.map((args) => String(args[1]));
+    expect(sentPayloads.some((p) => p.includes('Q1'))).toBe(true);
+    expect(sentPayloads.some((p) => p.includes('A1'))).toBe(true);
+    expect(sentPayloads.some((p) => p.includes('Q2'))).toBe(true);
   });
 });
 

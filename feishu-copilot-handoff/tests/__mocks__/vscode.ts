@@ -46,6 +46,12 @@ const workspace = {
   },
 };
 
+const ConfigurationTarget = {
+  Global: 1,
+  Workspace: 2,
+  WorkspaceFolder: 3,
+};
+
 const StatusBarAlignment = {
   Left: 1,
   Right: 2,
@@ -61,5 +67,11 @@ class Uri {
   get fsPath() { return this.path; }
 }
 
-export { commands, window, workspace, Uri, StatusBarAlignment, ThemeColor };
-export default { commands, window, workspace, Uri, StatusBarAlignment, ThemeColor };
+export function __resetMockConfigStore() {
+  for (const key of Object.keys(configStore)) {
+    delete configStore[key];
+  }
+}
+
+export { commands, window, workspace, Uri, StatusBarAlignment, ThemeColor, ConfigurationTarget };
+export default { commands, window, workspace, Uri, StatusBarAlignment, ThemeColor, ConfigurationTarget };

@@ -1,0 +1,4 @@
+{
+  "github.copilot.chat.agentDebugLog.fileLogging.enabled": true,
+  "github.copilot.chat.agentDebugLog.fileLogging.flushIntervalMs": 500
+}
