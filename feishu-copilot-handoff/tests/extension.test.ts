@@ -26,6 +26,7 @@ describe('activate', () => {
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.stop', expect.any(Function));
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.restart', expect.any(Function));
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.openSettings', expect.any(Function));
+    expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.persistTargetChatId', expect.any(Function));
     expect(commands.registerCommand).toHaveBeenCalledWith('feishuCopilotHandoff.status', expect.any(Function));
     expect(vscode.window.createStatusBarItem).toHaveBeenCalledTimes(1);
   });

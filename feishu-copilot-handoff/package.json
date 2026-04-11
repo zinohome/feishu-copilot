@@ -16,6 +16,7 @@
     "onCommand:feishuCopilotHandoff.stop",
     "onCommand:feishuCopilotHandoff.restart",
     "onCommand:feishuCopilotHandoff.openSettings",
+    "onCommand:feishuCopilotHandoff.persistTargetChatId",
     "onCommand:feishuCopilotHandoff.status"
   ],
   "contributes": {
@@ -24,6 +25,7 @@
       { "command": "feishuCopilotHandoff.stop", "title": "Feishu Copilot Handoff: Stop" },
       { "command": "feishuCopilotHandoff.restart", "title": "Feishu Copilot Handoff: Restart" },
       { "command": "feishuCopilotHandoff.openSettings", "title": "Feishu Copilot Handoff: Open Settings" },
+      { "command": "feishuCopilotHandoff.persistTargetChatId", "title": "Feishu Copilot Handoff: Save Learned Target Chat ID" },
       { "command": "feishuCopilotHandoff.status", "title": "Feishu Copilot Handoff: Status" }
     ],
     "configuration": {

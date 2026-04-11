@@ -21,6 +21,7 @@ export interface ActivateDeps {
 let activeEventSource: { dispose: () => void } | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 let activeController: BridgeController | undefined;
+let learnedTargetChatId: string | undefined;
 
 function readLiveConfig(): ReturnType<typeof readExtensionConfig> {
   return readExtensionConfig(vscode.workspace.getConfiguration('feishuCopilotHandoff'));
@@ -160,6 +161,7 @@ export async function activate(
     }
 
     let runtimeTargetChatId = config.targetChatId;
+    learnedTargetChatId = runtimeTargetChatId || learnedTargetChatId;
 
     const controller = new BridgeController({
       ownerOpenId: config.ownerOpenId,
@@ -182,6 +184,7 @@ export async function activate(
 
         if (!runtimeTargetChatId) {
           runtimeTargetChatId = message.chatId;
+          learnedTargetChatId = runtimeTargetChatId;
           activeController.setTargetChatId(runtimeTargetChatId);
           await refreshSessions(activeController);
           void vscode.window.showInformationMessage(`Feishu Copilot Handoff learned target chat: ${runtimeTargetChatId}`);
@@ -216,12 +219,23 @@ export async function activate(
     await cmds.executeCommand('workbench.action.openSettings', 'feishuCopilotHandoff');
   }
 
+  async function persistLearnedTargetChatId(): Promise<void> {
+    if (!learnedTargetChatId) {
+      void vscode.window.showWarningMessage('Feishu Copilot Handoff: No learned target chat yet. Send one authorized message first.');
+      return;
+    }
+
+    await vscode.workspace.getConfiguration('feishuCopilotHandoff').update('targetChatId', learnedTargetChatId, true);
+    void vscode.window.showInformationMessage(`Feishu Copilot Handoff saved targetChatId: ${learnedTargetChatId}`);
+  }
+
   async function showStatusActions(): Promise<void> {
     const options: vscode.QuickPickItem[] = [
       { label: '$(play) Start Bridge', description: 'Start Feishu handoff connection' },
       { label: '$(stop) Stop Bridge', description: 'Stop Feishu handoff connection' },
       { label: '$(debug-restart) Restart Bridge', description: 'Restart Feishu handoff connection' },
       { label: '$(gear) Open Settings', description: 'Open Feishu Copilot Handoff settings' },
+      { label: '$(save) Save Learned Target Chat ID', description: 'Persist the auto-learned chat_id into settings' },
       { label: '$(info) Show Runtime Status', description: 'Show current mode and active target' },
     ];
 
@@ -254,6 +268,11 @@ export async function activate(
       return;
     }
 
+    if (picked.label.includes('Save Learned Target Chat ID')) {
+      await persistLearnedTargetChatId();
+      return;
+    }
+
     const statusText = activeController?.getStatusText() ?? 'mode: follow-latest\nsession: none';
     void vscode.window.showInformationMessage(statusText);
   }
@@ -280,6 +299,7 @@ export async function activate(
     cmds.registerCommand('feishuCopilotHandoff.stop', () => stopBridge()),
     cmds.registerCommand('feishuCopilotHandoff.restart', () => restartBridge()),
     cmds.registerCommand('feishuCopilotHandoff.openSettings', () => openSettings()),
+    cmds.registerCommand('feishuCopilotHandoff.persistTargetChatId', () => persistLearnedTargetChatId()),
     cmds.registerCommand('feishuCopilotHandoff.status', () => showStatusActions()),
   );
 
@@ -291,6 +311,7 @@ export function deactivate(): void {
   activeEventSource?.dispose();
   activeEventSource = undefined;
   activeController = undefined;
+  learnedTargetChatId = undefined;
   statusBarItem?.dispose();
   statusBarItem = undefined;
 }

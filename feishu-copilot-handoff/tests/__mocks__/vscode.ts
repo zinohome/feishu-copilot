@@ -9,6 +9,7 @@ const commands = {
 const window = {
   showInformationMessage: vi.fn(async (_msg: string) => undefined),
   showErrorMessage: vi.fn(async (_msg: string) => undefined),
+  showWarningMessage: vi.fn(async (_msg: string) => undefined),
   showQuickPick: vi.fn(async () => undefined),
   createStatusBarItem: vi.fn(() => ({
     text: '',
@@ -29,6 +30,10 @@ const workspace = {
     get: (key: string, defaultValue?: unknown) => {
       const fullKey = section ? `${section}.${key}` : key;
       return fullKey in configStore ? configStore[fullKey] : defaultValue;
+    },
+    update: async (key: string, value: unknown, _target?: unknown) => {
+      const fullKey = section ? `${section}.${key}` : key;
+      configStore[fullKey] = value;
     },
   }),
   onDidChangeConfiguration: (listener: (evt: { affectsConfiguration: (section: string) => boolean }) => void) => {
