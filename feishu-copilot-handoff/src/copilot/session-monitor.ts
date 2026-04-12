@@ -552,8 +552,29 @@ export class SessionMonitor {
   /**
    * Drain all pending events to Feishu in FIFO order.
    * Call this after processFile returns.
+   *
+   * Before draining, we stable-sort events so that for each requestId
+   * the user-message always precedes any assistant-message.  This
+   * eliminates race-conditions where a RESP_PATCH for request N arrives
+   * in the same poll cycle as an APPEND for request N+1, causing
+   * the assistant reply to appear before the user question in Feishu.
    */
   async drainQueue(): Promise<void> {
+    // Stable sort: keep overall insertion order, but within the same
+    // requestId push user-message before assistant-message.
+    if (this.pendingEvents.length > 1) {
+      const indexed = this.pendingEvents.map((e, i) => ({ e, i }));
+      indexed.sort((a, b) => {
+        if (a.e.requestId === b.e.requestId) {
+          const aOrder = a.e.type === 'user-message' ? 0 : 1;
+          const bOrder = b.e.type === 'user-message' ? 0 : 1;
+          if (aOrder !== bOrder) return aOrder - bOrder;
+        }
+        return a.i - b.i; // preserve original insertion order otherwise
+      });
+      this.pendingEvents = indexed.map(x => x.e);
+    }
+
     while (this.pendingEvents.length > 0) {
       const event = this.pendingEvents.shift()!;
       try {
