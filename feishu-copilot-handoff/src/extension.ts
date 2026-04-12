@@ -5,7 +5,7 @@ import { readExtensionConfig } from './config';
 import { ChatCommandService } from './copilot/chat-command-service';
 import { listChatSessionFiles } from './copilot/session-discovery';
 import { SessionMonitor } from './copilot/session-monitor';
-import { getTenantAccessToken, sendFeishuText } from './feishu/client';
+import { getTenantAccessToken, sendFeishuText, sendFeishuMirrorMessage, updateFeishuMirrorMessage } from './feishu/client';
 import { startFeishuEventSource } from './feishu/event-source';
 
 export interface ActivateDeps {
@@ -108,13 +108,27 @@ async function freshToken(config: ReturnType<typeof readLiveConfig>): Promise<st
   return cachedToken;
 }
 
-async function sendToFeishu(text: string, meta?: { role: 'user' | 'assistant' }): Promise<void> {
+async function createFeishuMessage(text: string, meta?: { role: 'user' | 'assistant' }): Promise<string | undefined> {
+  if (!runtimeTargetChatId) return undefined;
+  const config = readLiveConfig();
+  const token = await freshToken(config);
+  
+  if (meta?.role) {
+    const type = meta.role === 'user' ? 'user-message' : 'assistant-message';
+    return await sendFeishuMirrorMessage(token, runtimeTargetChatId, text, { type });
+  } else {
+    return await sendFeishuText(token, runtimeTargetChatId, text);
+  }
+}
+
+async function updateFeishuMessage(messageId: string, text: string, meta?: { role: 'user' | 'assistant' }): Promise<void> {
   if (!runtimeTargetChatId) return;
   const config = readLiveConfig();
   const token = await freshToken(config);
-  const chunks = splitTextForFeishu(text);
-  for (const chunk of chunks) {
-    await sendFeishuText(token, runtimeTargetChatId, chunk);
+  
+  if (meta?.role) {
+    const type = meta.role === 'user' ? 'user-message' : 'assistant-message';
+    await updateFeishuMirrorMessage(token, messageId, text, { type });
   }
 }
 
@@ -181,13 +195,18 @@ async function startBridge(showToast = true): Promise<void> {
   }
 
   if (config.targetChatId) runtimeTargetChatId = config.targetChatId;
-  const monitor = new SessionMonitor(sendToFeishu);
+  const monitor = new SessionMonitor(createFeishuMessage, updateFeishuMessage);
   activeMonitor = monitor;
 
   if (sessionRefreshTimer) clearInterval(sessionRefreshTimer);
-  sessionRefreshTimer = setInterval(() => { if (activeMonitor) void refreshSessions(activeMonitor); }, SESSION_REFRESH_INTERVAL_MS);
 
+  // Initial bootstrap scan — builds internal state, does NOT send historical
+  // messages to Feishu.  Must complete before the periodic timer starts to
+  // prevent a race where the timer fires mid-bootstrap.
   await refreshSessions(monitor);
+
+  // Now start periodic polling — only genuinely new events will be forwarded.
+  sessionRefreshTimer = setInterval(() => { if (activeMonitor) void refreshSessions(activeMonitor); }, SESSION_REFRESH_INTERVAL_MS);
 
   activeEventSource = startFeishuEventSource({
     appId: config.feishuAppId,

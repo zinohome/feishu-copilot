@@ -2,7 +2,8 @@
  * SessionMonitor — streams Copilot chat session events from a JSONL file.
  *
  * Architecture:
- *   - Monitors the file as a tail-f would: tracks byte offset, reads only new content on each poll.
+ *   - Monitors the file as a tail-f would: tracks processed line count,
+ *     reads only new content on each poll.
  *   - Emits events immediately as they appear — no waiting for "complete responses".
  *   - Deduplicates by requestId so user messages are sent at most once, and assistant
  *     messages are sent at most once per requestId (always the latest content).
@@ -18,6 +19,9 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { CopilotTurn } from '../types';
+
+/** Maximum age for a message to be considered valid for Feishu handoff (30 minutes). */
+const MAX_AGE_MS = 30 * 60 * 1000;
 
 /** Fields on a "rich text" part that carry UI chrome, not user-visible prose. */
 const UI_CHROME_FIELDS = new Set([
@@ -57,28 +61,30 @@ function isReadablePart(part: unknown): boolean {
 
 function extractReadableText(part: unknown): string {
   if (!part || typeof part !== 'object') return '';
-  if (!isReadablePart(part)) return '';
-
+  
   const obj = part as Record<string, unknown>;
+  const kind = obj.kind as string | undefined;
 
-  // toolInvocationSerialized: extract invocationMessage.value if present
-  const toolPart = part as { kind?: string; invocationMessage?: { value?: string } };
-  if (toolPart.kind === 'toolInvocationSerialized' && toolPart.invocationMessage?.value) {
-    return toolPart.invocationMessage.value;
+  // 1. Explicitly ignore metadata kinds
+  if (kind && METADATA_KINDS.has(kind)) {
+    // Special case: toolInvocationSerialized has a visible message
+    if (kind === 'toolInvocationSerialized' && typeof obj.invocationMessage === 'object') {
+      const inv = obj.invocationMessage as { value?: string };
+      if (inv.value) return `[[NOTE]]正在运行：${inv.value}[[/NOTE]]`;
+    }
+    return '';
   }
 
-  // Direct string value
+  // 2. Direct string value (most common for markdownContent or plain parts)
   if (typeof obj.value === 'string' && obj.value.length > 0) {
     return obj.value;
   }
 
-  // Fallback: collect primitive values but skip UI chrome fields
-  const fragments: string[] = [];
-  for (const [key, val] of Object.entries(obj)) {
-    if (key === 'kind' || UI_CHROME_FIELDS.has(key)) continue;
-    if (typeof val === 'string' && val.length > 0) fragments.push(val);
-  }
-  return fragments.join('\n');
+  // 3. Fallback: only collect specific known text fields, NOT a generic loop
+  if (typeof obj.text === 'string' && obj.text.length > 0) return obj.text;
+  if (typeof obj.markdown === 'string' && obj.markdown.length > 0) return obj.markdown;
+
+  return '';
 }
 
 export type StreamEvent =
@@ -86,14 +92,18 @@ export type StreamEvent =
   | { type: 'assistant-message'; requestId: string; text: string; timestamp: number };
 
 interface FileState {
-  /** Absolute byte offset of the last successfully processed line. */
-  offset: number;
-  /** Total line count at last read (for bootstrap detection). */
-  lineCount: number;
+  /** Number of non-empty lines already processed from this file. */
+  processedLines: number;
   /** Maps parser-index → requestId (populated as append events are seen). */
   indexToRequestId: Map<number, string>;
-  /** Tracks accumulated assistant text per index for incremental patches. */
-  accumulatedTextByIndex: Map<number, string>;
+  /** Tracks accumulated assistant parts per index for incremental patches. */
+  accumulatedPartsByIndex: Map<number, Map<number, string>>;
+  /** Tracks the merged assistant text per index. */
+  mergedTextByIndex: Map<number, string>;
+  /** Tracks timestamp per requestId to filter out old assistant patches. */
+  requestTimestamps: Map<string, number>;
+  /** Tracks user query per requestId to avoid echoing it back as assistant text. */
+  accumulatedUserTextByReqId: Map<string, string>;
 }
 
 interface SessionState {
@@ -111,7 +121,7 @@ function extractResponseText(response: unknown[]): string {
   const parts = response
     .map((p) => extractReadableText(p))
     .filter((t) => t.length > 0);
-  return parts.join('\n');
+  return parts.join('\n\n');
 }
 
 /**
@@ -145,20 +155,39 @@ export class SessionMonitor {
   /** Pending events to be drained in the next drainQueue call. */
   private pendingEvents: StreamEvent[] = [];
 
+  /** Tracks messageId sent to Feishu for each requestId (enabling PATCH updates). */
+  private feishuMessageIds = new Map<string, string>();
+
   constructor(
-    private readonly sendFeishuText: (
+    private readonly sendFeishuMessage: (
+      text: string,
+      meta?: { role: 'user' | 'assistant' },
+    ) => Promise<string | undefined>,
+    private readonly updateFeishuMessage: (
+      messageId: string,
       text: string,
       meta?: { role: 'user' | 'assistant' },
     ) => Promise<void>,
     private readonly onSessionSwitch?: (sessionId: string, title: string) => void,
+    private readonly isTestMode: boolean = false,
   ) {}
 
   /**
    * Process new content from a JSONL file since last read.
    * Call this on every poll cycle.
    *
+   * Uses line-count based tracking: we remember the number of non-empty
+   * lines already processed so the next poll starts exactly where we left
+   * off.  This avoids the byte-offset mismatch bug caused by
+   * content.split('\n').filter(Boolean) discarding empty lines.
+   *
+   * On bootstrap (first read or file truncation): we scan ALL lines to
+   * build internal index/state mappings but do NOT enqueue any messages.
+   * This prevents historical chat records from flooding Feishu on every
+   * extension restart.
+   *
    * @param filePath  Absolute path to the .jsonl file
-   * @param content  Full file content (we track offset internally)
+   * @param content  Full file content (we track line count internally)
    */
   async processFile(filePath: string, content: string): Promise<void> {
     const lines = content.split('\n').filter(Boolean);
@@ -167,42 +196,35 @@ export class SessionMonitor {
     let fileState = this.sessionState.fileStates.get(filePath);
     if (!fileState) {
       fileState = {
-        offset: 0,
-        lineCount: 0,
+        processedLines: 0,
         indexToRequestId: new Map(),
-        accumulatedTextByIndex: new Map(),
+        accumulatedPartsByIndex: new Map(),
+        mergedTextByIndex: new Map(),
+        requestTimestamps: new Map(),
+        accumulatedUserTextByReqId: new Map(),
       };
       this.sessionState.fileStates.set(filePath, fileState);
     }
 
-    // Detect bootstrap: if file was rotated/truncated, re-read from start.
-    // Also bootstrap on first read (offset === 0).
-    // On bootstrap: we rebuild index mapping but do NOT send messages from snapshots.
-    // Incremental events (kind=2) are still sent normally since they represent new data.
-    const isBootstrap = fileState.offset === 0 || totalLines < fileState.lineCount;
+    // Detect bootstrap: first read OR file was rotated/truncated.
+    const isBootstrap = fileState.processedLines === 0 || totalLines < fileState.processedLines;
     if (isBootstrap) {
-      fileState.offset = 0;
+      fileState.processedLines = 0;
       fileState.indexToRequestId.clear();
-      fileState.accumulatedTextByIndex.clear();
+      fileState.accumulatedPartsByIndex.clear();
+      fileState.mergedTextByIndex.clear();
+      fileState.requestTimestamps.clear();
+      fileState.accumulatedUserTextByReqId.clear();
       console.log('[session-monitor] bootstrap: rebuilding index for', path.basename(filePath));
     }
 
-    // Determine which lines to process
-    let startLine = 0;
-    if (!isBootstrap && fileState.offset > 0) {
-      // Normal mode: find the line corresponding to the offset
-      let currentOffset = 0;
-      for (let i = 0; i < lines.length; i++) {
-        const lineLength = lines[i].length + 1; // +1 for newline
-        if (currentOffset + lineLength > fileState.offset) {
-          startLine = i;
-          break;
-        }
-        currentOffset += lineLength;
-      }
-    }
+    // Determine which lines to process.
+    // Bootstrap: start from 0 to scan everything for state building.
+    // Normal:    start from processedLines to read only new lines.
+    const startLine = isBootstrap ? 0 : fileState.processedLines;
 
-    if (startLine >= totalLines) return; // No new lines
+    // No new lines — nothing to do.
+    if (startLine >= totalLines) return;
 
     const newLines = lines.slice(startLine);
     const parserIndexBase = fileState.indexToRequestId.size;
@@ -232,27 +254,36 @@ export class SessionMonitor {
         this.sessionState.title = newTitle;
 
         // Build index mapping from snapshot requests.
-        // During bootstrap: don't send messages from snapshot (they're history).
-        // During normal polls: send messages from snapshot.
         const requests = v.requests as Array<{ requestId?: string; timestamp?: number; message?: { text?: string } }> | undefined;
         if (Array.isArray(requests)) {
           let idx = parserIndexBase;
           for (const req of requests) {
-            if (req.requestId) {
-              fileState.indexToRequestId.set(idx, req.requestId);
+            const rId = req.requestId;
+            if (rId) {
+              fileState.indexToRequestId.set(idx, rId);
+              const ts = req.timestamp ?? Date.now();
+              fileState.requestTimestamps.set(rId, ts);
+              if (req.message?.text) {
+                fileState.accumulatedUserTextByReqId.set(rId, req.message.text.trim());
+              }
 
-              if (!isBootstrap) {
+              const isOld = ts < Date.now() - MAX_AGE_MS;
+              const skipMsg = (!this.isTestMode && isBootstrap) || isOld;
+              if (skipMsg) {
+                // Bootstrap or too old: mark as already-sent so subsequent polls
+                // won't re-send historical messages.
+                this.sentUserReqKeys.add(rId);
+              } else {
                 // Normal mode: emit user message for snapshot request
                 const text = req.message?.text?.trim();
                 if (text) {
-                  const reqKey = req.requestId;
-                  if (!this.sentUserReqKeys.has(reqKey)) {
-                    this.sentUserReqKeys.add(reqKey);
+                  if (!this.sentUserReqKeys.has(rId)) {
+                    this.sentUserReqKeys.add(rId);
                     this.pendingEvents.push({
                       type: 'user-message',
-                      requestId: req.requestId,
+                      requestId: rId,
                       text,
-                      timestamp: req.timestamp ?? Date.now(),
+                      timestamp: ts,
                     });
                   }
                 }
@@ -264,9 +295,9 @@ export class SessionMonitor {
       }
     }
 
-    // Second pass: emit events for each new line
-    // During bootstrap: incremental events (kind=2) are still sent since they represent
-    // new data that just appeared. Only snapshot data (kind=0) is suppressed above.
+    // Second pass: emit events for each new line.
+    // During bootstrap: we only build index/state mappings — NO messages
+    // are enqueued.
     for (let i = 0; i < newLines.length; i++) {
       const line = newLines[i];
       let entry: { kind?: number; k?: unknown[]; v?: unknown };
@@ -287,21 +318,42 @@ export class SessionMonitor {
           message?: { text?: string };
         }>;
         for (const req of requests) {
-          if (!req.requestId) continue;
           const idx = fileState.indexToRequestId.size;
-          fileState.indexToRequestId.set(idx, req.requestId);
+          const rId = req.requestId;
+          if (!rId) continue;
+
+          const placeholder = `__idx_${idx}__`;
+          if (fileState.indexToRequestId.get(idx) === placeholder) {
+            console.log(`[session-monitor] migrating state from ${placeholder} to ${rId}`);
+            this.migrateIdState(placeholder, rId);
+          }
+          fileState.indexToRequestId.set(idx, rId);
+
+          const ts = req.timestamp ?? Date.now();
+          fileState.requestTimestamps.set(rId, ts);
+          if (req.message?.text) {
+            fileState.accumulatedUserTextByReqId.set(rId, req.message.text.trim());
+          }
+
+          const isOld = ts < Date.now() - MAX_AGE_MS;
+          const skipMsg = (!this.isTestMode && isBootstrap) || isOld;
+          // Bootstrap or old: build index + mark sent, skip queueing.
+          if (skipMsg) {
+            this.sentUserReqKeys.add(rId);
+            continue;
+          }
 
           const text = req.message?.text?.trim();
+          console.log(`[debug] User msg check: text=${text}, reqKey=${rId}, skipMsg=${skipMsg}, sentKeysHash=${this.sentUserReqKeys.has(rId)}`);
           if (!text) continue;
 
-          const reqKey = req.requestId;
-          if (!this.sentUserReqKeys.has(reqKey)) {
-            this.sentUserReqKeys.add(reqKey);
+          if (!this.sentUserReqKeys.has(rId)) {
+            this.sentUserReqKeys.add(rId);
             this.pendingEvents.push({
               type: 'user-message',
-              requestId: req.requestId,
+              requestId: rId,
               text,
-              timestamp: req.timestamp ?? Date.now(),
+              timestamp: ts,
             });
           }
         }
@@ -317,42 +369,94 @@ export class SessionMonitor {
       const subsubfield = entry.k[4] as string | undefined;
 
       // Map index → requestId
-      if (!fileState.indexToRequestId.has(idx)) {
-        fileState.indexToRequestId.set(idx, `__idx_${idx}__`);
+      let requestId = fileState.indexToRequestId.get(idx);
+      if (!requestId) {
+        requestId = `__idx_${idx}__`;
+        fileState.indexToRequestId.set(idx, requestId);
       }
-      const requestId = fileState.indexToRequestId.get(idx) ?? `__idx_${idx}__`;
       const reqKey = requestId;
 
-      // k: ['requests', N, 'response', undefined] → full response replacement
-      // k: ['requests', N, 'response', M, 'value'] → incremental text patch
+      // k: ['requests', N, 'response', ...] → response data
       if (field === 'response') {
         let text = '';
 
         if (subfield === undefined) {
+          // Whole response array update
           const newText = extractResponseText(entry.v as unknown[]);
           if (newText) {
-            fileState.accumulatedTextByIndex.set(idx, newText);
+            fileState.mergedTextByIndex.set(idx, newText);
+            // Also reset/populate parts map for consistency
+            const partsMap = new Map<number, string>();
+            if (Array.isArray(entry.v)) {
+              entry.v.forEach((p, i) => {
+                const pt = extractReadableText(p);
+                if (pt) partsMap.set(i, pt);
+              });
+            }
+            fileState.accumulatedPartsByIndex.set(idx, partsMap);
             text = newText;
           }
-        } else if (typeof subfield === 'number' && subsubfield === 'value') {
-          const existing = fileState.accumulatedTextByIndex.get(idx) ?? '';
-          const updated = typeof entry.v === 'string' ? existing + entry.v : existing;
-          fileState.accumulatedTextByIndex.set(idx, updated);
-          text = updated;
-        } else if (subfield === 'value') {
-          const existing = fileState.accumulatedTextByIndex.get(idx) ?? '';
-          const updated = typeof entry.v === 'string' ? existing + entry.v : existing;
-          fileState.accumulatedTextByIndex.set(idx, updated);
-          text = updated;
-        } else {
-          const partText = extractReadableText(entry.v);
-          if (partText) {
-            fileState.accumulatedTextByIndex.set(idx, partText);
-            text = partText;
+        } else if (typeof subfield === 'number') {
+          // Update to a specific part
+          let partsMap = fileState.accumulatedPartsByIndex.get(idx);
+          if (!partsMap) {
+            partsMap = new Map<number, string>();
+            fileState.accumulatedPartsByIndex.set(idx, partsMap);
           }
+
+          if (subsubfield === 'value') {
+            // Incremental patch to existing part's value
+            const existingPart = partsMap.get(subfield) ?? '';
+            const updatedPart = typeof entry.v === 'string' ? existingPart + entry.v : existingPart;
+            partsMap.set(subfield, updatedPart);
+          } else if (subsubfield === undefined) {
+            // Whole part update
+            const pt = extractReadableText(entry.v);
+            partsMap.set(subfield, pt);
+          }
+
+          // Re-merge all parts for this request
+          const sortedParts = Array.from(partsMap.entries())
+            .sort(([a], [b]) => a - b)
+            .map(([, v]) => v)
+            .filter(Boolean);
+          
+          text = sortedParts.join('\n\n');
+          fileState.mergedTextByIndex.set(idx, text);
+        } else if (subfield === 'value') {
+          // Legacy/Fallback: direct value patch on the whole response (rare in modern logs)
+          const existing = fileState.mergedTextByIndex.get(idx) ?? '';
+          const updated = typeof entry.v === 'string' ? existing + entry.v : existing;
+          fileState.mergedTextByIndex.set(idx, updated);
+          text = updated;
         }
 
         if (!text) continue;
+
+        // Strip LaTeX math delimiters that Feishu card markdown doesn't render well
+        text = text
+          .replace(/\\\[(.*?)\\\]/gs, '$1')
+          .replace(/\\\((.*?)\\\)/gs, '$1')
+          .replace(/\$+(.*?)\$+/gs, '$1')
+          .replace(/\\overline\{(.*?)\}/g, '$1');
+
+        // HEURISTIC: Skip if assistant text is identical to user query (echo bug)
+        const userQuery = fileState.accumulatedUserTextByReqId.get(requestId);
+        if (text === userQuery) {
+          console.log(`[session-monitor] skipping assistant text echo of user query for ${requestId}`);
+          continue;
+        }
+
+        // Retrieve the timestamp we recorded for this request
+        const reqTs = fileState.requestTimestamps.get(requestId) ?? Date.now();
+        const isOld = reqTs < Date.now() - MAX_AGE_MS;
+        const skipMsg = (!this.isTestMode && isBootstrap) || isOld;
+
+        // Bootstrap or too old: record accumulated state but do NOT send.
+        if (skipMsg) {
+          this.lastSentAssistantByReqKey.set(reqKey, text);
+          continue;
+        }
 
         const lastSent = this.lastSentAssistantByReqKey.get(reqKey) ?? '';
         if (text !== lastSent) {
@@ -367,9 +471,10 @@ export class SessionMonitor {
       }
     }
 
-    // Update offset to the end of the file for next read
-    fileState.offset = content.length;
-    fileState.lineCount = totalLines;
+    // Advance the processed line count so the next poll starts after
+    // the last line we just handled.  This is simple and reliable —
+    // immune to the empty-line filtering byte-offset mismatch.
+    fileState.processedLines = totalLines;
   }
 
   /**
@@ -381,13 +486,54 @@ export class SessionMonitor {
       const event = this.pendingEvents.shift()!;
       try {
         const role = event.type === 'user-message' ? 'user' : 'assistant';
-        const prefix = event.type === 'user-message' ? '👤 ' : '🤖 ';
-        await this.sendFeishuText(prefix + event.text, { role });
+        const msgKey = `${event.type}:${event.requestId}`;
+        const existingMsgId = this.feishuMessageIds.get(msgKey);
+
+        if (existingMsgId) {
+          await this.updateFeishuMessage(existingMsgId, event.text, { role });
+        } else {
+          const msgId = await this.sendFeishuMessage(event.text, { role });
+          if (msgId) {
+            this.feishuMessageIds.set(msgKey, msgId);
+          }
+        }
       } catch (err) {
-        console.warn('[session-monitor] send failed, re-queueing:', err);
+        console.warn('[session-monitor] send/update failed, re-queueing:', err);
         this.pendingEvents.unshift(event);
-        break;
+        break; // Stop draining, try again next tick
       }
+    }
+  }
+
+  private migrateIdState(oldId: string, newId: string): void {
+    // 1. Migrate user sent state
+    if (this.sentUserReqKeys.has(oldId)) {
+      this.sentUserReqKeys.delete(oldId);
+      this.sentUserReqKeys.add(newId);
+    }
+
+    // 2. Migrate assistant text state
+    const lastText = this.lastSentAssistantByReqKey.get(oldId);
+    if (lastText !== undefined) {
+      this.lastSentAssistantByReqKey.delete(oldId);
+      this.lastSentAssistantByReqKey.set(newId, lastText);
+    }
+
+    // 3. Migrate Feishu message IDs (VERY IMPORTANT for PATCH)
+    const userMsgKey = `user-message:${oldId}`;
+    const newUserMsgKey = `user-message:${newId}`;
+    const existingUserMsgId = this.feishuMessageIds.get(userMsgKey);
+    if (existingUserMsgId) {
+      this.feishuMessageIds.delete(userMsgKey);
+      this.feishuMessageIds.set(newUserMsgKey, existingUserMsgId);
+    }
+
+    const assistantMsgKey = `assistant-message:${oldId}`;
+    const newAssistantMsgKey = `assistant-message:${newId}`;
+    const existingAssistantMsgId = this.feishuMessageIds.get(assistantMsgKey);
+    if (existingAssistantMsgId) {
+      this.feishuMessageIds.delete(assistantMsgKey);
+      this.feishuMessageIds.set(newAssistantMsgKey, existingAssistantMsgId);
     }
   }
 

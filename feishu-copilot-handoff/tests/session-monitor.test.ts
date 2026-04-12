@@ -2,31 +2,35 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { SessionMonitor } from '../src/copilot/session-monitor';
 
 describe('SessionMonitor', () => {
-  const mockSend = vi.fn().mockResolvedValue(undefined);
+  const mockSend = vi.fn().mockResolvedValue('fake-msg-id');
+  const mockUpdate = vi.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
-    mockSend.mockClear().mockResolvedValue(undefined);
+    mockSend.mockClear().mockResolvedValue('fake-msg-id');
+    mockUpdate.mockClear().mockResolvedValue(undefined);
   });
 
   it('emits user-message on append event with message.text', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'hello' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'hello' } }] }),
     ].join('\n');
 
     await monitor.processFile('/fake/test.jsonl', jsonl);
     await monitor.drainQueue();
 
     expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend).toHaveBeenCalledWith('👤 hello', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('hello', { role: 'user' });
   });
 
   it('emits assistant-message on response patch after user message', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'hello' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'hello' } }] }),
       JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [{ kind: 'markdownContent', value: 'world' }] }),
     ].join('\n');
 
@@ -34,15 +38,16 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockSend).toHaveBeenCalledWith('👤 hello', { role: 'user' });
-    expect(mockSend).toHaveBeenCalledWith('🤖 world', { role: 'assistant' });
+    expect(mockSend).toHaveBeenCalledWith('hello', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('world', { role: 'assistant' });
   });
 
   it('skips metadata parts (thinking, toolInvocationSerialized, etc.) in response', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'question' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'question' } }] }),
       JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [
         { kind: 'thinking', value: 'encrypted binary data' },
         { kind: 'toolInvocationSerialized', invocationMessage: { value: 'running cmd' } },
@@ -54,15 +59,16 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockSend).toHaveBeenCalledWith('👤 question', { role: 'user' });
-    expect(mockSend).toHaveBeenCalledWith('🤖 actual answer', { role: 'assistant' });
+    expect(mockSend).toHaveBeenCalledWith('question', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('[[NOTE]]正在运行：running cmd[[/NOTE]]\n\nactual answer', { role: 'assistant' });
   });
 
   it('dedupes user messages by requestId', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'hello' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'hello' } }] }),
     ].join('\n');
 
     // Process same file twice (simulating poll cycle)
@@ -75,10 +81,11 @@ describe('SessionMonitor', () => {
   });
 
   it('dedupes assistant messages by requestId + content', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'hello' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'hello' } }] }),
       JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [{ value: 'answer' }] }),
     ].join('\n');
 
@@ -86,7 +93,7 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockSend).toHaveBeenCalledWith('🤖 answer', { role: 'assistant' });
+    expect(mockSend).toHaveBeenCalledWith('answer', { role: 'assistant' });
 
     mockSend.mockClear();
 
@@ -95,13 +102,15 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     expect(mockSend).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 
   it('incremental value patch appends to existing text', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'hello' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'hello' } }] }),
       // Whole response replace: extracts 'first ' from the single response part
       JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [{ value: 'first ' }] }),
       // Incremental value patch for part index 1: appends 'second' to accumulated text
@@ -112,17 +121,19 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     // 1) user message: 'hello'
-    // 2) whole response patch: 'first '
-    // 3) incremental patch: accumulated 'first second'
-    expect(mockSend).toHaveBeenCalledTimes(3);
-    expect(mockSend).toHaveBeenCalledWith('👤 hello', { role: 'user' });
-    expect(mockSend).toHaveBeenCalledWith('🤖 first ', { role: 'assistant' });
-    expect(mockSend).toHaveBeenCalledWith('🤖 first second', { role: 'assistant' });
+    // 2) whole response patch: 'first ' (mockSend)
+    // 3) incremental patch: accumulated 'first second' (mockUpdate)
+    expect(mockSend).toHaveBeenCalledTimes(2); // user msg + first chunk
+    expect(mockSend).toHaveBeenCalledWith('hello', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('first ', { role: 'assistant' });
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledWith('fake-msg-id', 'first \n\nsecond', { role: 'assistant' });
   });
 
   it('bootstraps from snapshot (kind=0)', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     const jsonl = [
       JSON.stringify({
         kind: 0,
@@ -130,7 +141,7 @@ describe('SessionMonitor', () => {
           sessionId: 'session-snap',
           customTitle: 'Snapshot Session',
           requests: [
-            { requestId: 'req-snap', timestamp: 50, message: { text: 'snap msg' }, response: [{ value: 'snap answer' }] },
+            { requestId: 'req-snap', timestamp: now, message: { text: 'snap msg' }, response: [{ value: 'snap answer' }] },
           ],
         },
       }),
@@ -141,16 +152,17 @@ describe('SessionMonitor', () => {
     await monitor.drainQueue();
 
     expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockSend).toHaveBeenCalledWith('👤 snap msg', { role: 'user' });
-    expect(mockSend).toHaveBeenCalledWith('🤖 updated answer', { role: 'assistant' });
+    expect(mockSend).toHaveBeenCalledWith('snap msg', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('updated answer', { role: 'assistant' });
   });
 
   it('resets dedupe state on bootstrap (file rotated)', async () => {
-    const monitor = new SessionMonitor(mockSend);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, undefined, true);
 
+    const now = Date.now();
     // First session with a new file (bootstrap)
     const jsonl1 = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: 100, message: { text: 'msg1' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-1', timestamp: now, message: { text: 'msg1' } }] }),
     ].join('\n');
 
     await monitor.processFile('/fake/test.jsonl', jsonl1);
@@ -165,19 +177,19 @@ describe('SessionMonitor', () => {
     // Instead, test that dedupe state IS reset by processing a SECOND new file.
 
     const jsonl2 = [
-      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-2', timestamp: 200, message: { text: 'msg2' } }] }),
+      JSON.stringify({ kind: 2, k: ['requests'], v: [{ requestId: 'req-2', timestamp: now, message: { text: 'msg2' } }] }),
     ].join('\n');
 
     // Different file path = fresh FileState, no dedupe accumulated
     await monitor.processFile('/fake/rotated.jsonl', jsonl2);
     await monitor.drainQueue();
     expect(mockSend).toHaveBeenCalledTimes(2);
-    expect(mockSend).toHaveBeenCalledWith('👤 msg2', { role: 'user' });
+    expect(mockSend).toHaveBeenCalledWith('msg2', { role: 'user' });
   });
 
   it('emits session switch when sessionId changes', async () => {
     const onSessionSwitch = vi.fn();
-    const monitor = new SessionMonitor(mockSend, onSessionSwitch);
+    const monitor = new SessionMonitor(mockSend, mockUpdate, onSessionSwitch, true);
 
     const jsonl1 = [
       JSON.stringify({ kind: 0, v: { sessionId: 'session-a', customTitle: 'Session A', requests: [] } }),
