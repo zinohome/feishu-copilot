@@ -23,8 +23,16 @@ let learnedTargetChatId: string | undefined;
 let sessionRefreshTimer: NodeJS.Timeout | undefined;
 let runtimeTargetChatId: string | undefined;
 let contextStoragePath: string | undefined;
+let outputChannel: vscode.OutputChannel | undefined;
 const SESSION_REFRESH_INTERVAL_MS = 350;
 const FEISHU_TEXT_CHUNK_SIZE = 2400;
+
+function log(message: string): void {
+  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  const line = `[${ts}] ${message}`;
+  outputChannel?.appendLine(line);
+  console.log(message);
+}
 
 function splitTextForFeishu(text: string, chunkSize = FEISHU_TEXT_CHUNK_SIZE): string[] {
   if (text.length <= chunkSize) return [text];
@@ -112,7 +120,7 @@ async function createFeishuMessage(text: string, meta?: { role: 'user' | 'assist
   if (!runtimeTargetChatId) return undefined;
   const config = readLiveConfig();
   const token = await freshToken(config);
-  
+  log(`[extension] createFeishuMessage role=${meta?.role} len=${text.length}`);
   if (meta?.role) {
     const type = meta.role === 'user' ? 'user-message' : 'assistant-message';
     return await sendFeishuMirrorMessage(token, runtimeTargetChatId, text, { type });
@@ -144,7 +152,7 @@ async function refreshSessions(monitor: SessionMonitor): Promise<void> {
   try {
     const files = await listChatSessionFiles(storagePath);
     const now = new Date().toISOString().slice(11, 19);
-    console.log(`[feishu-copilot-handoff] ${now} refreshSessions: found ${files.length} files`);
+    log(`[feishu-copilot-handoff] ${now} refreshSessions: found ${files.length} files`);
     if (files.length === 0) return;
     for (const filePath of files) {
       try {
@@ -158,7 +166,7 @@ async function refreshSessions(monitor: SessionMonitor): Promise<void> {
     await monitor.drainQueue();
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.warn('[feishu-copilot-handoff] refreshSessions error:', errMsg);
+    log('[feishu-copilot-handoff] refreshSessions error: ' + errMsg);
   }
 }
 
@@ -195,7 +203,7 @@ async function startBridge(showToast = true): Promise<void> {
   }
 
   if (config.targetChatId) runtimeTargetChatId = config.targetChatId;
-  const monitor = new SessionMonitor(createFeishuMessage, updateFeishuMessage);
+  const monitor = new SessionMonitor(createFeishuMessage, updateFeishuMessage, undefined, false, log);
   activeMonitor = monitor;
 
   if (sessionRefreshTimer) clearInterval(sessionRefreshTimer);
@@ -284,7 +292,10 @@ async function showStatusActions(): Promise<void> {
 export async function activate(context: vscode.ExtensionContext, deps?: ActivateDeps): Promise<void> {
   const cmds = deps?.commands ?? vscode.commands;
 
-  // Determine storagePath from context
+  // Create output channel first so all startup logs appear there
+  outputChannel = vscode.window.createOutputChannel('Feishu Copilot Handoff');
+  context.subscriptions.push(outputChannel);
+
   contextStoragePath = deps?.workspaceStoragePath;
   if (!contextStoragePath && context.storageUri) {
     contextStoragePath = path.dirname(context.storageUri.fsPath);
@@ -292,7 +303,7 @@ export async function activate(context: vscode.ExtensionContext, deps?: Activate
   if (!contextStoragePath && context.globalStorageUri) {
     contextStoragePath = path.dirname(context.globalStorageUri.fsPath);
   }
-  console.log('[feishu-copilot-handoff] initialized with storagePath:', contextStoragePath);
+  log('[feishu-copilot-handoff] initialized with storagePath: ' + contextStoragePath);
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.show();

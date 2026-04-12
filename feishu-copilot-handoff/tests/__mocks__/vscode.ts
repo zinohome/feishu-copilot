@@ -19,6 +19,13 @@ const window = {
     show: vi.fn(),
     dispose: vi.fn(),
   })),
+  createOutputChannel: vi.fn(() => ({
+    appendLine: vi.fn(),
+    append: vi.fn(),
+    show: vi.fn(),
+    dispose: vi.fn(),
+    clear: vi.fn(),
+  })),
 };
 
 const configStore: Record<string, unknown> = {};

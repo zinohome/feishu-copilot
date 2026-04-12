@@ -49,6 +49,10 @@ const METADATA_KINDS = new Set([
   'textEditGroup',
   'elicitationSerialized',
   'mcpServersStarting',
+  'undoStop',
+  'codeblockUri',
+  'questionCarousel',
+  'workspaceEdit',
 ]);
 
 function isReadablePart(part: unknown): boolean {
@@ -170,7 +174,13 @@ export class SessionMonitor {
     ) => Promise<void>,
     private readonly onSessionSwitch?: (sessionId: string, title: string) => void,
     private readonly isTestMode: boolean = false,
+    private readonly logger?: (msg: string) => void,
   ) {}
+
+  private log(msg: string): void {
+    if (this.logger) this.logger(msg);
+    else console.log(msg);
+  }
 
   /**
    * Process new content from a JSONL file since last read.
@@ -254,7 +264,7 @@ export class SessionMonitor {
         this.sessionState.title = newTitle;
 
         // Build index mapping from snapshot requests.
-        const requests = v.requests as Array<{ requestId?: string; timestamp?: number; message?: { text?: string } }> | undefined;
+        const requests = v.requests as Array<{ requestId?: string; timestamp?: number; message?: { text?: string }; response?: unknown[] }> | undefined;
         if (Array.isArray(requests)) {
           let idx = parserIndexBase;
           for (const req of requests) {
@@ -288,6 +298,26 @@ export class SessionMonitor {
                   }
                 }
               }
+
+              // Extract inline response from snapshot request if present
+              if (Array.isArray(req.response) && req.response.length > 0) {
+                const inlineText = extractResponseText(req.response);
+                if (inlineText) {
+                  fileState.mergedTextByIndex.set(idx, inlineText);
+                  const partsMap = new Map<number, string>();
+                  req.response.forEach((p, pi) => {
+                    const pt = extractReadableText(p);
+                    if (pt) partsMap.set(pi, pt);
+                  });
+                  fileState.accumulatedPartsByIndex.set(idx, partsMap);
+
+                  if (skipMsg) {
+                    this.lastSentAssistantByReqKey.set(rId, inlineText);
+                  }
+                  // Non-skip snapshot responses will be emitted by the second pass
+                  // via k:["requests", N, "response"] patches if present.
+                }
+              }
             }
             idx++;
           }
@@ -316,6 +346,7 @@ export class SessionMonitor {
           requestId?: string;
           timestamp?: number;
           message?: { text?: string };
+          response?: unknown[];
         }>;
         for (const req of requests) {
           const idx = fileState.indexToRequestId.size;
@@ -337,24 +368,64 @@ export class SessionMonitor {
 
           const isOld = ts < Date.now() - MAX_AGE_MS;
           const skipMsg = (!this.isTestMode && isBootstrap) || isOld;
-          // Bootstrap or old: build index + mark sent, skip queueing.
+
+          // --- Enqueue user message ---
           if (skipMsg) {
             this.sentUserReqKeys.add(rId);
-            continue;
+          } else {
+            const text = req.message?.text?.trim();
+            if (text && !this.sentUserReqKeys.has(rId)) {
+              this.sentUserReqKeys.add(rId);
+              this.pendingEvents.push({
+                type: 'user-message',
+                requestId: rId,
+                text,
+                timestamp: ts,
+              });
+            }
           }
 
-          const text = req.message?.text?.trim();
-          console.log(`[debug] User msg check: text=${text}, reqKey=${rId}, skipMsg=${skipMsg}, sentKeysHash=${this.sentUserReqKeys.has(rId)}`);
-          if (!text) continue;
+          // --- Extract inline response if present ---
+          if (Array.isArray(req.response) && req.response.length > 0) {
+            const inlineText = extractResponseText(req.response);
+            if (inlineText) {
+              fileState.mergedTextByIndex.set(idx, inlineText);
+              // Populate parts map for consistency
+              const partsMap = new Map<number, string>();
+              req.response.forEach((p, pi) => {
+                const pt = extractReadableText(p);
+                if (pt) partsMap.set(pi, pt);
+              });
+              fileState.accumulatedPartsByIndex.set(idx, partsMap);
 
-          if (!this.sentUserReqKeys.has(rId)) {
-            this.sentUserReqKeys.add(rId);
-            this.pendingEvents.push({
-              type: 'user-message',
-              requestId: rId,
-              text,
-              timestamp: ts,
-            });
+              // Sanitize text (same as the response patch handler below)
+              let sanitized = inlineText
+                .replace(/\\\[(.*?)\\\]/gs, '$1')
+                .replace(/\\\((.*?)\\\)/gs, '$1')
+                .replace(/\$+(.*?)\$+/gs, '$1')
+                .replace(/\\overline\{(.*?)\}/g, '$1')
+                .replace(/\[([^\]]+)\]\((file|vscode):[^\)]+\)/g, '$1 (local file)');
+
+              // Skip echo
+              const userQuery = fileState.accumulatedUserTextByReqId.get(rId);
+              if (sanitized === userQuery) {
+                console.log(`[session-monitor] skipping inline assistant text echo for ${rId}`);
+              } else if (skipMsg) {
+                this.lastSentAssistantByReqKey.set(rId, sanitized);
+              } else {
+                const lastSent = this.lastSentAssistantByReqKey.get(rId) ?? '';
+                if (sanitized !== lastSent) {
+                  this.lastSentAssistantByReqKey.set(rId, sanitized);
+                  this.pendingEvents.push({
+                    type: 'assistant-message',
+                    requestId: rId,
+                    text: sanitized,
+                    timestamp: Date.now(),
+                  });
+                  console.log(`[session-monitor] enqueued INLINE assistant response for ${rId}, len=${sanitized.length}`);
+                }
+              }
+            }
           }
         }
         continue;
@@ -405,15 +476,16 @@ export class SessionMonitor {
           }
 
           if (subsubfield === 'value') {
-            // Incremental patch to existing part's value
+            // Incremental string patch to value field of this part
             const existingPart = partsMap.get(subfield) ?? '';
             const updatedPart = typeof entry.v === 'string' ? existingPart + entry.v : existingPart;
             partsMap.set(subfield, updatedPart);
           } else if (subsubfield === undefined) {
-            // Whole part update
+            // Whole part object replacement
             const pt = extractReadableText(entry.v);
             partsMap.set(subfield, pt);
           }
+          // Other subsubfields (kind, invocationMessage, etc.) are only handled via the whole-part path above
 
           // Re-merge all parts for this request
           const sortedParts = Array.from(partsMap.entries())
@@ -433,12 +505,13 @@ export class SessionMonitor {
 
         if (!text) continue;
 
-        // Strip LaTeX math delimiters that Feishu card markdown doesn't render well
+        // Strip LaTeX math delimiters and local non-HTTP URLs that Feishu card markdown rejects
         text = text
           .replace(/\\\[(.*?)\\\]/gs, '$1')
           .replace(/\\\((.*?)\\\)/gs, '$1')
           .replace(/\$+(.*?)\$+/gs, '$1')
-          .replace(/\\overline\{(.*?)\}/g, '$1');
+          .replace(/\\overline\{(.*?)\}/g, '$1')
+          .replace(/\[([^\]]+)\]\((file|vscode):[^\)]+\)/g, '$1 (local file)');
 
         // HEURISTIC: Skip if assistant text is identical to user query (echo bug)
         const userQuery = fileState.accumulatedUserTextByReqId.get(requestId);
@@ -452,7 +525,6 @@ export class SessionMonitor {
         const isOld = reqTs < Date.now() - MAX_AGE_MS;
         const skipMsg = (!this.isTestMode && isBootstrap) || isOld;
 
-        // Bootstrap or too old: record accumulated state but do NOT send.
         if (skipMsg) {
           this.lastSentAssistantByReqKey.set(reqKey, text);
           continue;

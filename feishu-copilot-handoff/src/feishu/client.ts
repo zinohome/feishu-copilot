@@ -182,14 +182,7 @@ export async function updateFeishuMirrorMessage(
     return result.data.message_id;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.warn(`[feishu-client] interactive PATCH failed (${errMsg}), fallback text PATCH`);
-    const fallbackResult = await requestJson<{ data: { message_id: string } }>(
-      `${BASE_URL}/im/v1/messages/${messageId}`,
-      { content: JSON.stringify({ text }) },
-      token,
-      fetchImpl,
-      'PATCH'
-    );
-    return fallbackResult.data.message_id;
+    console.warn(`[feishu-client] interactive PATCH failed (${errMsg}) - skipping fallback as msg_type cannot be changed.`);
+    return messageId;
   }
 }
