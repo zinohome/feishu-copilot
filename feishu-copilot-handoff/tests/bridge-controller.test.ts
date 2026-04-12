@@ -209,7 +209,7 @@ describe('BridgeController mirror flow', () => {
     expect(sentPayloads.some((p) => p.includes('Q2'))).toBe(true);
   });
 
-  it('does not echo Feishu-originated user text back to Feishu', async () => {
+  it('allows mirrored user text even if originally sent from Feishu', async () => {
     const sendText = vi.fn().mockResolvedValue('msg_1');
     const submitToChat = vi.fn().mockResolvedValue(undefined);
     const controller = new BridgeController({
@@ -237,7 +237,7 @@ describe('BridgeController mirror flow', () => {
     });
 
     const sentPayloads = sendText.mock.calls.map((args) => String(args[1]));
-    expect(sentPayloads.some((p) => p.includes('这是飞书端发过来的消息'))).toBe(false);
+    expect(sentPayloads.some((p) => p.includes('这是飞书端发过来的消息'))).toBe(true);
     expect(sentPayloads.some((p) => p.includes('我收到了'))).toBe(true);
   });
 });

@@ -1,0 +1,10 @@
+.vscode/**
+src/**
+tests/**
+docs/**
+**/*.ts
+**/*.map
+**/*.test.js
+tsconfig.json
+vitest.config.ts
+**/__mocks__/**

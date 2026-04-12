@@ -27,12 +27,87 @@ function collectPrimitiveFragments(node: unknown): string[] {
   return fragments;
 }
 
+/**
+ * Kinds that represent tool calls, internal state, or UI chrome — not user-visible
+ * assistant prose.  When we encounter a response part with one of these kinds we
+ * skip it so that the final assistantText only contains readable content.
+ */
+const METADATA_KINDS = new Set([
+  'thinking',
+  'toolInvocationSerialized',
+  'progressTaskSerialized',
+  'inlineReference',
+  'textEditGroup',
+  'elicitationSerialized',
+  'mcpServersStarting',
+]);
+
+/**
+ * Fields on a "rich text" part that carry UI chrome, not user-visible prose.
+ * We exclude these from primitive extraction so that booleans, URIs, etc.
+ * don't leak into the assistant text.
+ */
+const UI_CHROME_FIELDS = new Set([
+  'supportThemeIcons',
+  'supportHtml',
+  'supportAlertSyntax',
+  'baseUri',
+  'uris',
+  'id',
+  'metadata',
+  'isComplete',
+  'source',
+  'toolCallId',
+  'toolId',
+  'invocationMessage',
+  'presentation',
+]);
+
+function isReadablePart(part: unknown): boolean {
+  if (!part || typeof part !== 'object') {
+    return false;
+  }
+  const kind = (part as Record<string, unknown>).kind;
+  // Parts without a `kind` field are plain text/markdown — always readable.
+  if (kind === undefined) {
+    return true;
+  }
+  // markdownContent is explicitly readable.
+  if (kind === 'markdownContent') {
+    return true;
+  }
+  // Everything else in METADATA_KINDS is not user-visible prose.
+  return false;
+}
+
 function extractResponsePartText(part: unknown): string {
   if (!part || typeof part !== 'object') {
     return '';
   }
 
-  const fragments = collectPrimitiveFragments(part).filter((fragment) => fragment.length > 0);
+  // Skip metadata parts entirely — they contain tool-call state, encrypted
+  // thinking blobs, progress indicators, etc., not user-visible text.
+  if (!isReadablePart(part)) {
+    return '';
+  }
+
+  // For readable parts, extract only the `value` field (or the text content),
+  // not UI chrome fields like supportThemeIcons, baseUri, etc.
+  const obj = part as Record<string, unknown>;
+  if (typeof obj.value === 'string' && obj.value.length > 0) {
+    return obj.value;
+  }
+
+  // Fallback: collect primitive fragments but exclude UI chrome fields
+  const fragments: string[] = [];
+  for (const [key, val] of Object.entries(obj)) {
+    if (key === 'kind' || UI_CHROME_FIELDS.has(key)) {
+      continue;
+    }
+    if (typeof val === 'string' && val.length > 0) {
+      fragments.push(val);
+    }
+  }
   return fragments.join('\n');
 }
 
@@ -131,6 +206,8 @@ export function parseChatSessionJsonl(fileName: string, content: string, fileWri
   type EventTurn = CopilotTurn & { index: number };
   const turnsByIndex = new Map<number, EventTurn>();
   const pendingAppendIndexes: number[] = [];
+  const pendingResponseIndexes: number[] = [];
+  const pendingResponseIndexSet = new Set<number>();
   let requestIndex = 0;
   let sessionId = fallbackSessionId;
   let title = fallbackSessionId;
@@ -188,6 +265,20 @@ export function parseChatSessionJsonl(fileName: string, content: string, fileWri
           message?: { text?: string };
           response?: unknown;
         };
+        // If response patches for an absolute index arrived first, backfill this append into that slot.
+        const responseFirstIdx = pendingResponseIndexes.shift();
+        if (responseFirstIdx !== undefined) {
+          pendingResponseIndexSet.delete(responseFirstIdx);
+          const existing = turnsByIndex.get(responseFirstIdx);
+          if (existing) {
+            existing.requestId = request.requestId ?? existing.requestId;
+            existing.userText = request.message?.text ?? existing.userText;
+            existing.timestamp = request.timestamp ?? existing.timestamp;
+            turnsByIndex.set(responseFirstIdx, existing);
+            continue;
+          }
+        }
+
         const idx = requestIndex;
         requestIndex += 1;
         turnsByIndex.set(idx, {
@@ -254,9 +345,38 @@ export function parseChatSessionJsonl(fileName: string, content: string, fileWri
     }
 
     if (field === 'response') {
-      const assistantText = collectAssistantTextFromEventResponse(entry.v);
-      if (assistantText) {
-        existing.assistantText = assistantText;
+      if (subfield === undefined) {
+        // Full response replacement — only overwrite if the new response
+        // contains readable text.  Metadata-only responses (e.g. a final
+        // progressTaskSerialized event) must not clobber existing prose.
+        const assistantText = collectAssistantTextFromEventResponse(entry.v);
+        if (assistantText) {
+          existing.assistantText = assistantText;
+        }
+      } else {
+        // Individual response-part patch — skip metadata parts.
+        if (typeof entry.v === 'string') {
+          // String leaf patches (e.g. k: ['requests', N, 'response', M, 'value'])
+          // are always readable text.
+          if (entry.v) {
+            existing.assistantText = existing.assistantText
+              ? `${existing.assistantText}\n${entry.v}`
+              : entry.v;
+          }
+        } else {
+          const partText = extractResponsePartText(entry.v);
+          if (partText) {
+            existing.assistantText = existing.assistantText
+              ? `${existing.assistantText}\n${partText}`
+              : partText;
+          }
+        }
+      }
+
+      // If this index has response first but no request text yet, queue it for append backfill.
+      if (!existing.userText && !pendingResponseIndexSet.has(idx)) {
+        pendingResponseIndexes.push(idx);
+        pendingResponseIndexSet.add(idx);
       }
     }
 

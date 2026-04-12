@@ -99,15 +99,21 @@ export async function sendFeishuMirrorMessage(
   }
 
   const role = meta.type === 'user-message' ? 'user' : 'assistant';
-  const result = await postJson<{ data: { message_id: string } }>(
-    `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
-    {
-      receive_id: chatId,
-      msg_type: 'interactive',
-      content: JSON.stringify(buildInteractiveCard(text, role)),
-    },
-    token,
-    fetchImpl,
-  );
-  return result.data.message_id;
+  try {
+    const result = await postJson<{ data: { message_id: string } }>(
+      `${BASE_URL}/im/v1/messages?receive_id_type=chat_id`,
+      {
+        receive_id: chatId,
+        msg_type: 'interactive',
+        content: JSON.stringify(buildInteractiveCard(text, role)),
+      },
+      token,
+      fetchImpl,
+    );
+    return result.data.message_id;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn('[feishu-client] interactive send failed, fallback to text:', errMsg);
+    return sendFeishuText(token, chatId, text, fetchImpl);
+  }
 }

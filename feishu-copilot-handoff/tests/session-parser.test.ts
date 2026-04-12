@@ -60,7 +60,7 @@ describe('parseChatSessionJsonl', () => {
     expect(summary.turns[0]).toEqual({
       requestId: 'req-100',
       userText: 'hello test',
-      assistantText: 'internal\nfinal answer',
+      assistantText: 'final answer',
       timestamp: 123,
     });
   });
@@ -116,7 +116,7 @@ describe('parseChatSessionJsonl', () => {
     expect(summary.turns[1]).toEqual({
       requestId: 'req-2',
       userText: 'latest question',
-      assistantText: 'internal\nlatest answer',
+      assistantText: 'latest answer',
       timestamp: 200,
     });
     expect(summary.lastUserMessageAt).toBe(200);
@@ -161,11 +161,142 @@ describe('parseChatSessionJsonl', () => {
     expect(summary.turns[0]).toEqual({
       requestId: 'req-8',
       userText: '是吗？',
-      assistantText: 'internal\n当然。',
+      assistantText: '当然。',
       timestamp: 200,
     });
     expect(summary.lastUserMessageAt).toBe(200);
     expect(summary.lastAssistantMessageAt).toBe(200);
+  });
+
+  it('updates assistant text from indexed response-part patches', () => {
+    const indexedJsonl = [
+      JSON.stringify({
+        kind: 2,
+        k: ['requests'],
+        v: [
+          {
+            requestId: 'req-idx',
+            timestamp: 333,
+            message: { text: 'question' },
+          },
+        ],
+      }),
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 0, 'response', 0],
+        v: { kind: 'markdownContent', value: 'first chunk' },
+      }),
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 0, 'response', 1, 'value'],
+        v: 'second chunk',
+      }),
+    ].join('\n');
+
+    const summary = parseChatSessionJsonl('session-indexed.jsonl', indexedJsonl, 400);
+    expect(summary.turns).toHaveLength(1);
+    expect(summary.turns[0]).toEqual({
+      requestId: 'req-idx',
+      userText: 'question',
+      assistantText: 'first chunk\nsecond chunk',
+      timestamp: 333,
+    });
+  });
+
+  it('rebinds when response absolute index arrives before append request event', () => {
+    const responseFirstJsonl = [
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 233, 'response'],
+        v: [{ kind: 'markdownContent', value: 'late mapped answer' }],
+      }),
+      JSON.stringify({
+        kind: 2,
+        k: ['requests'],
+        v: [
+          {
+            requestId: 'req-late-bind',
+            timestamp: 444,
+            message: { text: 'late mapped question' },
+          },
+        ],
+      }),
+    ].join('\n');
+
+    const summary = parseChatSessionJsonl('session-response-first.jsonl', responseFirstJsonl, 500);
+    expect(summary.turns).toHaveLength(1);
+    expect(summary.turns[0]).toEqual({
+      requestId: 'req-late-bind',
+      userText: 'late mapped question',
+      assistantText: 'late mapped answer',
+      timestamp: 444,
+    });
+  });
+
+  it('filters out metadata response parts and preserves readable text', () => {
+    const metadataJsonl = [
+      JSON.stringify({
+        kind: 2,
+        k: ['requests'],
+        v: [
+          {
+            requestId: 'req-meta',
+            timestamp: 555,
+            message: { text: 'show me the code' },
+          },
+        ],
+      }),
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 0, 'response'],
+        v: [
+          { kind: 'thinking', value: 'internal reasoning' },
+          { value: 'Here is the code:' },
+          { kind: 'toolInvocationSerialized', invocationMessage: 'apply patch', isComplete: true },
+          { kind: 'markdownContent', value: '```js\nconsole.log("hello")\n```' },
+        ],
+      }),
+    ].join('\n');
+
+    const summary = parseChatSessionJsonl('session-metadata.jsonl', metadataJsonl, 600);
+    expect(summary.turns).toHaveLength(1);
+    expect(summary.turns[0].assistantText).toBe('Here is the code:\n```js\nconsole.log("hello")\n```');
+  });
+
+  it('does not overwrite readable assistant text with metadata-only response', () => {
+    const overwriteJsonl = [
+      JSON.stringify({
+        kind: 2,
+        k: ['requests'],
+        v: [
+          {
+            requestId: 'req-overwrite',
+            timestamp: 666,
+            message: { text: 'hello' },
+          },
+        ],
+      }),
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 0, 'response'],
+        v: [
+          { value: 'readable answer' },
+        ],
+      }),
+      // A later response event replaces the entire response with metadata only
+      JSON.stringify({
+        kind: 2,
+        k: ['requests', 0, 'response'],
+        v: [
+          { kind: 'progressTaskSerialized', title: '已压缩对话', completed: false },
+        ],
+      }),
+    ].join('\n');
+
+    const summary = parseChatSessionJsonl('session-overwrite.jsonl', overwriteJsonl, 700);
+    expect(summary.turns).toHaveLength(1);
+    // The metadata-only response should NOT overwrite the readable text
+    expect(summary.turns[0].assistantText).toBe('readable answer');
   });
 });
 
